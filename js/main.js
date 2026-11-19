@@ -175,7 +175,13 @@ function startNewGame() {
   gameoverOverlay.classList.add('hidden');
   hud.classList.remove('hidden');
 
-  const diffLabels = { easy: '簡單', medium: '普通', hard: '困難' };
+  const diffLabels = {
+    easy: '入門',
+    medium: '普通',
+    hard: '困難',
+    master: '宗師',
+    abyss: '地獄'
+  };
   hudModeBadge.textContent = config.mode === 'pve'
     ? `單人・${diffLabels[config.difficulty]}`
     : '雙人同機';
