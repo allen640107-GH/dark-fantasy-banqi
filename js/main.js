@@ -107,6 +107,12 @@ function bindUI() {
   });
 
   // HUD Controls
+  document.getElementById('btn-3d-mode').addEventListener('click', (e) => {
+    const on = scene3d.toggleHero3DMode();
+    e.currentTarget.classList.toggle('active', on);
+    e.currentTarget.textContent = on ? '🗿 立體：開' : '🗿 立體：關';
+  });
+
   document.getElementById('btn-camera').addEventListener('click', (e) => {
     const name = scene3d.cycleCameraPreset();
     e.currentTarget.textContent = `🎥 視角：${name}`;

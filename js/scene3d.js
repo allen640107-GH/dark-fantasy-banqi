@@ -27,6 +27,8 @@ export class DarkChessScene3D {
     this.vfxParticles = [];
     this.portraitImages = new Map();
     this.faceTextureCache = new Map();
+    this.standeeTextureCache = new Map();
+    this.hero3DEnabled = true;
 
     this.cameraPresetIdx = 0;
     this.cameraLerp = null;
@@ -605,6 +607,245 @@ export class DarkChessScene3D {
     return tex;
   }
 
+  _getHeroStandeeTexture(piece) {
+    const key = piece.meta.key;
+    if (this.standeeTextureCache.has(key)) return this.standeeTextureCache.get(key);
+
+    const w = 384, h = 480;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d');
+    const isRed = piece.color === 'red';
+
+    // Gothic pointed arch shield silhouette for the summoned 3D hero
+    const drawArchPath = (pad = 14) => {
+      ctx.beginPath();
+      ctx.moveTo(pad, h - pad - 24);
+      ctx.lineTo(pad, 155);
+      ctx.quadraticCurveTo(pad, 30, w / 2, pad);
+      ctx.quadraticCurveTo(w - pad, 30, w - pad, 155);
+      ctx.lineTo(w - pad, h - pad - 24);
+      ctx.quadraticCurveTo(w / 2, h - pad + 12, pad, h - pad - 24);
+      ctx.closePath();
+    };
+
+    ctx.save();
+    drawArchPath(18);
+    ctx.clip();
+
+    // Draw hero portrait framed nicely in upper/middle arch
+    const img = this.portraitImages.get(key);
+    if (img) {
+      ctx.drawImage(img, -28, 8, w + 56, w + 56);
+    } else {
+      ctx.fillStyle = isRed ? '#3a1010' : '#0f1b2c';
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    // Subtle glowing faction aura gradient at bottom so it merges smoothly with the 3D base
+    const aura = ctx.createLinearGradient(0, h * 0.62, 0, h);
+    aura.addColorStop(0, 'rgba(0,0,0,0)');
+    aura.addColorStop(0.7, isRed ? 'rgba(180, 42, 18, 0.55)' : 'rgba(20, 90, 150, 0.55)');
+    aura.addColorStop(1, isRed ? 'rgba(255, 170, 60, 0.92)' : 'rgba(95, 225, 255, 0.92)');
+    ctx.fillStyle = aura;
+    ctx.fillRect(0, h * 0.62, w, h * 0.38);
+    ctx.restore();
+
+    // Glowing forged metallic gothic arch frame
+    const borderGrad = ctx.createLinearGradient(0, 0, w, h);
+    if (isRed) {
+      borderGrad.addColorStop(0, '#ffe394');
+      borderGrad.addColorStop(0.5, '#e85227');
+      borderGrad.addColorStop(1, '#ffb84d');
+    } else {
+      borderGrad.addColorStop(0, '#c2f4ff');
+      borderGrad.addColorStop(0.5, '#3b82f6');
+      borderGrad.addColorStop(1, '#b36bff');
+    }
+    ctx.save();
+    ctx.shadowColor = isRed ? 'rgba(255, 100, 30, 0.85)' : 'rgba(70, 210, 255, 0.85)';
+    ctx.shadowBlur = 16;
+    drawArchPath(16);
+    ctx.lineWidth = 13;
+    ctx.strokeStyle = borderGrad;
+    ctx.stroke();
+    ctx.restore();
+
+    // Small crisp gold rank gem at bottom center of standee
+    const gx = w / 2, gy = h - 46;
+    ctx.fillStyle = isRed ? '#5c0f08' : '#091b2e';
+    ctx.beginPath();
+    ctx.arc(gx, gy, 32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = isRed ? '#ffd87a' : '#80e5ff';
+    ctx.stroke();
+    ctx.fillStyle = isRed ? '#fff6dc' : '#e6faff';
+    ctx.font = '900 38px "Noto Serif TC", "DFKai-SB", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(piece.meta.char, gx, gy + 3);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = 8;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.standeeTextureCache.set(key, tex);
+    return tex;
+  }
+
+  _buildRole3DSculpture(piece) {
+    const holoGroup = new THREE.Group();
+    const isRed = piece.color === 'red';
+    const metalColor = isRed ? 0xf2b955 : 0x7ddcff;
+    const glowColor = isRed ? 0xff5a22 : 0x52c8ff;
+    const accentColor = isRed ? 0xffdf85 : 0xb875ff;
+
+    const metalMat = new THREE.MeshStandardMaterial({
+      color: metalColor,
+      roughness: 0.24,
+      metalness: 0.88,
+      emissive: glowColor,
+      emissiveIntensity: 0.35
+    });
+    const energyMat = new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending
+    });
+
+    // 1. Summoned 3D Vertical Hero Plaque (thickened gothic holographic standee)
+    const standeeTex = this._getHeroStandeeTexture(piece);
+    const heightScale = 1.05 + piece.rank * 0.055; // Higher rank heroes stand slightly taller!
+    const pw = 0.86 * (0.94 + piece.rank * 0.02);
+    const ph = 1.08 * heightScale;
+
+    const plaqueGeo = new THREE.PlaneGeometry(pw, ph);
+    const plaqueMat = new THREE.MeshStandardMaterial({
+      map: standeeTex,
+      transparent: true,
+      alphaTest: 0.08,
+      roughness: 0.28,
+      metalness: 0.22,
+      emissive: glowColor,
+      emissiveIntensity: 0.14,
+      side: THREE.DoubleSide
+    });
+    const plaque = new THREE.Mesh(plaqueGeo, plaqueMat);
+    plaque.position.y = ph * 0.5 + 0.14;
+    plaque.castShadow = true;
+    holoGroup.add(plaque);
+
+    // Subtle glowing base summoning ring beneath the standee
+    const baseHalo = new THREE.Mesh(
+      new THREE.RingGeometry(0.42, 0.54, 32),
+      new THREE.MeshBasicMaterial({ color: glowColor, transparent: true, opacity: 0.55, side: THREE.DoubleSide, blending: THREE.AdditiveBlending })
+    );
+    baseHalo.rotation.x = -Math.PI / 2;
+    baseHalo.position.y = 0.15;
+    holoGroup.add(baseHalo);
+
+    // 2. Unique 3D Sculpted Miniature Crest / Weapon per Piece Rank!
+    const ornament = new THREE.Group();
+    ornament.userData = { spin: false, bob: true };
+
+    if (piece.rank === 6) {
+      // 帥/將: Floating 3D Royal Crown + Glowing Halo Ring above head
+      const crownRing = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.035, 8, 24), metalMat);
+      crownRing.rotation.x = Math.PI / 2;
+      ornament.add(crownRing);
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2;
+        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.2, 4), metalMat);
+        spike.position.set(Math.cos(a) * 0.2, 0.1, Math.sin(a) * 0.2);
+        ornament.add(spike);
+      }
+      const halo = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.018, 8, 32), energyMat);
+      halo.rotation.x = Math.PI / 2;
+      halo.position.y = 0.06;
+      ornament.add(halo);
+      ornament.position.y = ph + 0.24;
+      ornament.userData.spin = true;
+    } else if (piece.rank === 5) {
+      // 仕/士: 3D Crossed Runic Twin Swords behind hero
+      const makeSword = (tilt) => {
+        const s = new THREE.Group();
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.15, 0.025), metalMat);
+        const guard = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.05, 0.05), metalMat);
+        guard.position.y = -0.35;
+        s.add(blade, guard);
+        s.rotation.z = tilt;
+        return s;
+      };
+      ornament.add(makeSword(0.42), makeSword(-0.42));
+      ornament.position.set(0, ph * 0.58 + 0.14, -0.09);
+    } else if (piece.rank === 4) {
+      // 相/象: Orbiting 3D Arcane Soul/Fire Crystal + Rotating Magic Ring
+      const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 0), energyMat);
+      crystal.position.set(0.46, 0, 0);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.46, 0.018, 8, 32), metalMat);
+      ring.rotation.x = Math.PI / 2;
+      ornament.add(crystal, ring);
+      ornament.position.y = ph * 0.55 + 0.16;
+      ornament.userData.spin = true;
+    } else if (piece.rank === 3) {
+      // 俥/車: Heavy 3D Armored Bastion Horns & Shoulder Spikes flanking base
+      for (const side of [-1, 1]) {
+        const pauldron = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.52, 0.14), metalMat);
+        pauldron.position.set(side * 0.46, 0.34, -0.04);
+        pauldron.rotation.z = side * -0.18;
+        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.24, 5), metalMat);
+        spike.position.set(side * 0.5, 0.66, -0.04);
+        spike.rotation.z = side * -0.35;
+        ornament.add(pauldron, spike);
+      }
+      ornament.position.y = 0.08;
+    } else if (piece.rank === 2) {
+      // 傌/馬: Swept 3D Winged Cavalry Crest behind hero
+      for (const side of [-1, 1]) {
+        for (let k = 0; k < 2; k++) {
+          const wing = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.55 - k * 0.12, 4), metalMat);
+          wing.position.set(side * (0.44 + k * 0.08), ph * 0.65 - k * 0.18, -0.1);
+          wing.rotation.z = side * (-0.75 - k * 0.25);
+          ornament.add(wing);
+        }
+      }
+      ornament.position.y = 0.12;
+    } else if (piece.rank === 1) {
+      // 炮/包: 3D Forged Runic Cannon Barrel + Glowing Core at side
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.15, 0.56, 12), metalMat);
+      barrel.rotation.x = Math.PI * 0.36;
+      barrel.position.set(0.42, 0.46, 0.08);
+      const core = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 10), energyMat);
+      core.position.set(0.42, 0.58, 0.28);
+      ornament.add(barrel, core);
+    } else {
+      // 兵/卒: Crisp 3D Vanguard Spear tip rising behind
+      const spear = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 1.05, 8), metalMat);
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.22, 4), energyMat);
+      tip.position.y = 0.6;
+      ornament.add(spear, tip);
+      ornament.position.set(0.34, ph * 0.54 + 0.12, -0.08);
+      ornament.rotation.z = -0.18;
+    }
+
+    holoGroup.add(ornament);
+    holoGroup.userData = { ornament, baseY: PIECE_HEIGHT / 2 };
+    holoGroup.position.y = PIECE_HEIGHT / 2;
+    return holoGroup;
+  }
+
+  toggleHero3DMode() {
+    this.hero3DEnabled = !this.hero3DEnabled;
+    for (const entry of this.pieceMeshes.values()) {
+      if (entry.holoGroup) {
+        entry.holoGroup.visible = this.hero3DEnabled && entry.piece.revealed;
+      }
+    }
+    return this.hero3DEnabled;
+  }
+
   syncBoard(board) {
     // Clear existing piece meshes
     for (const entry of this.pieceMeshes.values()) {
@@ -667,11 +908,16 @@ export class DarkChessScene3D {
         const pos = this.gridToWorld(r, c);
         group.position.copy(pos);
 
+        // Attach hybrid 3D summoned hero standee + role-specific 3D weapon/crown sculpture!
+        const holoGroup = this._buildRole3DSculpture(piece);
+        holoGroup.visible = this.hero3DEnabled && piece.revealed;
+        group.add(holoGroup);
+
         // If face-down, rotate 180 deg around Z so bottom (sealed rune) faces up!
         group.rotation.z = piece.revealed ? 0 : Math.PI;
 
         this.scene.add(group);
-        this.pieceMeshes.set(piece.id, { group, mesh, bezel, piece, sideMatRed, sideMatBlack });
+        this.pieceMeshes.set(piece.id, { group, mesh, bezel, holoGroup, piece, sideMatRed, sideMatBlack });
       }
     }
   }
@@ -741,8 +987,26 @@ export class DarkChessScene3D {
         done: () => {
           entry.group.position.y = startY;
           entry.group.rotation.z = 0;
+          entry.piece.revealed = true;
           this.spawnBurst(pos, color === 'red' ? 0xff6a2b : 0x52d4ff, 26);
           this.triggerShake(0.08, 0.14);
+          // Summon the 3D hero standee & weapon upward from the revealed coin!
+          if (entry.holoGroup && this.hero3DEnabled) {
+            entry.holoGroup.visible = true;
+            entry.holoGroup.scale.set(0.05, 0.05, 0.05);
+            this.animations.push({
+              elapsed: 0,
+              duration: 0.34,
+              update: (sp) => {
+                // Slight elastic overshoot pop-up
+                const s = sp < 0.75 ? (sp / 0.75) * 1.1 : 1.1 - ((sp - 0.75) / 0.25) * 0.1;
+                entry.holoGroup.scale.set(s, s, s);
+              },
+              done: () => {
+                entry.holoGroup.scale.set(1, 1, 1);
+              }
+            });
+          }
           resolve();
         }
       });
@@ -1322,6 +1586,22 @@ export class DarkChessScene3D {
     for (const r of this.highlightRings) {
       const s = 1 + 0.09 * Math.sin(elapsed * 6);
       r.scale.set(s, s, 1);
+    }
+
+    // Animate 3D summoned hero standees & role sculptures (gentle hover, spin, face camera azimuth)
+    if (this.hero3DEnabled) {
+      const camYaw = Math.atan2(this.camera.position.x, this.camera.position.z);
+      for (const entry of this.pieceMeshes.values()) {
+        const hg = entry.holoGroup;
+        if (!hg || !hg.visible) continue;
+        hg.rotation.y = camYaw;
+        const bob = Math.sin(elapsed * 2.4 + entry.piece.id * 0.9) * 0.045;
+        hg.position.y = hg.userData.baseY + bob;
+        const orn = hg.userData.ornament;
+        if (orn && orn.userData.spin) {
+          orn.rotation.y += dt * 1.45;
+        }
+      }
     }
 
     // Float ambient embers & abyssal wisps
