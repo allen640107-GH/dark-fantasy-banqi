@@ -749,43 +749,460 @@ export class DarkChessScene3D {
     });
   }
 
-  animateMoveOrCapture(attackerId, defenderId, tr, tc, isCannon, attackerColor) {
+  animateMoveOrCapture(attackerId, defenderId, tr, tc, isCannon, attackerColor, attackerRank = 0, soldierSlaysGeneral = false) {
     const attacker = this.pieceMeshes.get(attackerId);
     const defender = defenderId ? this.pieceMeshes.get(defenderId) : null;
     if (!attacker) return Promise.resolve();
 
     const startPos = attacker.group.position.clone();
     const endPos = this.gridToWorld(tr, tc);
-    const jumpHeight = isCannon ? 2.6 : (defender ? 1.05 : 0.45);
-    const duration = isCannon ? 0.52 : (defender ? 0.36 : 0.26);
+    const primaryCol = attackerColor === 'red' ? 0xff5a22 : 0x45d1ff;
+    const accentCol = attackerColor === 'red' ? 0xffd86b : 0xb36bff;
 
+    // Simple non-capture move
+    if (!defender) {
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.26,
+          update: (p) => {
+            const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+            attacker.group.position.lerpVectors(startPos, endPos, ease);
+            attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * 0.42;
+          },
+          done: () => {
+            attacker.group.position.copy(endPos);
+            resolve();
+          }
+        });
+      });
+    }
+
+    const removeDefender = () => {
+      if (this.pieceMeshes.has(defenderId)) {
+        this.scene.remove(defender.group);
+        this.pieceMeshes.delete(defenderId);
+      }
+    };
+
+    // ===== 1. CANNON (炮 / 包): High-Arc Artillery Shell + Fiery/Void Explosion =====
+    if (isCannon || attackerRank === 1) {
+      return new Promise(resolve => {
+        // Spawn glowing mortar shell
+        const shellGeo = new THREE.SphereGeometry(0.24, 14, 14);
+        const shellMat = new THREE.MeshBasicMaterial({ color: accentCol });
+        const shell = new THREE.Mesh(shellGeo, shellMat);
+        shell.position.copy(startPos);
+        shell.position.y += 0.35;
+        this.scene.add(shell);
+
+        const shellLight = new THREE.PointLight(primaryCol, 14, 8);
+        shell.add(shellLight);
+
+        let lastTrail = 0;
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.42,
+          update: (p) => {
+            shell.position.lerpVectors(startPos, endPos, p);
+            shell.position.y = startPos.y + 0.35 + Math.sin(p * Math.PI) * 3.4;
+            // Attacker recoils slightly then starts moving
+            if (p < 0.35) {
+              const recoil = Math.sin((p / 0.35) * Math.PI) * 0.22;
+              const dir = new THREE.Vector3().subVectors(startPos, endPos).normalize();
+              attacker.group.position.copy(startPos).addScaledVector(dir, recoil);
+            } else {
+              const mp = (p - 0.35) / 0.65;
+              attacker.group.position.lerpVectors(startPos, endPos, mp * mp);
+              attacker.group.position.y = startPos.y + Math.sin(mp * Math.PI) * 1.4;
+            }
+            if (p - lastTrail > 0.05) {
+              lastTrail = p;
+              this.spawnBurst(shell.position, primaryCol, 3);
+            }
+          },
+          done: () => {
+            this.scene.remove(shell);
+            shellGeo.dispose();
+            shellMat.dispose();
+            attacker.group.position.copy(endPos);
+            removeDefender();
+            this._vfxExplosion(endPos, primaryCol, accentCol);
+            this.triggerShake(0.32, 0.36);
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 2. CHARIOT (俥 / 車): Wind-up + Heavy Ground Ramming Charge + Knockback =====
+    if (attackerRank === 3) {
+      const dir = new THREE.Vector3().subVectors(endPos, startPos).normalize();
+      const windupPos = startPos.clone().addScaledVector(dir, -0.45);
+      // Glowing ramming energy wedge attached to attacker
+      const shieldGeo = new THREE.ConeGeometry(0.72, 0.6, 4);
+      const shieldMat = new THREE.MeshBasicMaterial({ color: accentCol, transparent: true, opacity: 0.78, blending: THREE.AdditiveBlending });
+      const shield = new THREE.Mesh(shieldGeo, shieldMat);
+      shield.rotation.x = Math.PI / 2;
+      shield.lookAt(dir.clone().multiplyScalar(5));
+      shield.position.copy(dir).multiplyScalar(0.55);
+      shield.position.y = 0.12;
+      attacker.group.add(shield);
+
+      let knocked = false;
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.44,
+          update: (p) => {
+            if (p < 0.28) {
+              const wp = p / 0.28;
+              attacker.group.position.lerpVectors(startPos, windupPos, wp);
+            } else {
+              const cp = (p - 0.28) / 0.72;
+              const ease = cp * cp * cp;
+              attacker.group.position.lerpVectors(windupPos, endPos, Math.min(1, ease));
+              if (Math.random() < 0.45) this.spawnBurst(attacker.group.position, primaryCol, 2);
+              if (cp > 0.78 && !knocked) {
+                knocked = true;
+                this._vfxRamKnockback(defender, defenderId, dir, primaryCol, accentCol);
+                this.spawnShockwave(endPos, accentCol, 2.2);
+                this.spawnBurst(endPos, primaryCol, 42);
+                this.triggerShake(0.28, 0.3);
+              }
+            }
+          },
+          done: () => {
+            attacker.group.remove(shield);
+            shieldGeo.dispose();
+            shieldMat.dispose();
+            attacker.group.position.copy(endPos);
+            if (!knocked) removeDefender();
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 3. GENERAL (帥 / 將): Royal Hover + Celestial Pillar of Judgment =====
+    if (attackerRank === 6) {
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.5,
+          update: (p) => {
+            const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+            attacker.group.position.lerpVectors(startPos, endPos, ease);
+            attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * 1.9;
+          },
+          done: () => {
+            attacker.group.position.copy(endPos);
+            removeDefender();
+            this._vfxPillarOfJudgment(endPos, primaryCol, accentCol);
+            this.triggerShake(0.3, 0.34);
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 4. ADVISOR (仕 / 士): Swift Lunge + Twin X-Cross Blade Slash =====
+    if (attackerRank === 5) {
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.32,
+          update: (p) => {
+            const ease = 1 - Math.pow(1 - p, 3);
+            attacker.group.position.lerpVectors(startPos, endPos, ease);
+            attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * 0.95;
+          },
+          done: () => {
+            attacker.group.position.copy(endPos);
+            removeDefender();
+            this._vfxCrossSlash(endPos, primaryCol, accentCol);
+            this.spawnBurst(endPos, accentCol, 34);
+            this.triggerShake(0.18, 0.22);
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 5. ELEPHANT (相 / 象): Arcane Rune Circle Detonation =====
+    if (attackerRank === 4) {
+      this._vfxArcaneCircle(endPos, primaryCol, accentCol);
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.44,
+          update: (p) => {
+            const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+            attacker.group.position.lerpVectors(startPos, endPos, ease);
+            attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * 1.25;
+          },
+          done: () => {
+            attacker.group.position.copy(endPos);
+            removeDefender();
+            this.spawnBurst(endPos, accentCol, 44);
+            this.spawnShockwave(endPos, primaryCol, 2.1);
+            this.triggerShake(0.2, 0.24);
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 6. HORSE (傌 / 馬): Phantom Afterimage Dash + Swirling Cyclone =====
+    if (attackerRank === 2) {
+      let ghostsSpawned = 0;
+      return new Promise(resolve => {
+        this.animations.push({
+          elapsed: 0,
+          duration: 0.34,
+          update: (p) => {
+            const ease = 1 - Math.pow(1 - p, 2);
+            attacker.group.position.lerpVectors(startPos, endPos, ease);
+            attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * 1.35;
+            if (p > (ghostsSpawned + 1) * 0.22 && ghostsSpawned < 3) {
+              ghostsSpawned++;
+              this._spawnAfterimage(attacker.group.position, accentCol);
+            }
+          },
+          done: () => {
+            attacker.group.position.copy(endPos);
+            removeDefender();
+            this.spawnShockwave(endPos, accentCol, 1.9);
+            this.spawnShockwave(endPos, primaryCol, 1.3);
+            this.spawnBurst(endPos, primaryCol, 36);
+            this.triggerShake(0.18, 0.2);
+            resolve();
+          }
+        });
+      });
+    }
+
+    // ===== 7. SOLDIER (兵 / 卒): Heroic Strike (or Legendary Finisher if Slaying General!) =====
     return new Promise(resolve => {
       this.animations.push({
         elapsed: 0,
-        duration,
+        duration: soldierSlaysGeneral ? 0.54 : 0.34,
         update: (p) => {
           const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
           attacker.group.position.lerpVectors(startPos, endPos, ease);
-          attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * jumpHeight;
-          // Slight dramatic tilt during attack leap
-          if (defender) {
-            attacker.group.rotation.x = Math.sin(p * Math.PI) * 0.28;
-          }
+          attacker.group.position.y = startPos.y + Math.sin(p * Math.PI) * (soldierSlaysGeneral ? 2.1 : 0.9);
+          attacker.group.rotation.x = Math.sin(p * Math.PI) * 0.32;
         },
         done: () => {
           attacker.group.position.copy(endPos);
           attacker.group.rotation.x = 0;
-          if (defender) {
-            this.scene.remove(defender.group);
-            this.pieceMeshes.delete(defenderId);
-            const burstCol = attackerColor === 'red' ? 0xff5522 : 0x45d1ff;
-            this.spawnBurst(endPos, burstCol, isCannon ? 55 : 36);
-            this.spawnShockwave(endPos, burstCol, isCannon ? 2.4 : 1.5);
-            this.triggerShake(isCannon ? 0.24 : 0.15, isCannon ? 0.28 : 0.18);
+          removeDefender();
+          if (soldierSlaysGeneral) {
+            this._vfxPillarOfJudgment(endPos, 0xffd700, primaryCol);
+            this._vfxCrossSlash(endPos, 0xffffff, 0xffd700);
+            this.spawnBurst(endPos, 0xffd700, 75);
+            this.triggerShake(0.38, 0.45);
+          } else {
+            this.spawnBurst(endPos, primaryCol, 30);
+            this.spawnShockwave(endPos, accentCol, 1.45);
+            this.triggerShake(0.14, 0.16);
           }
           resolve();
         }
       });
+    });
+  }
+
+  // ===================== Specialized Role VFX Helpers =====================
+  _vfxExplosion(origin, primaryCol, accentCol) {
+    // Core expanding fireball / void blast sphere + flash light
+    const coreGeo = new THREE.SphereGeometry(0.45, 20, 20);
+    const coreMat = new THREE.MeshBasicMaterial({ color: accentCol, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.position.copy(origin);
+    core.position.y += 0.3;
+    this.scene.add(core);
+
+    const outerGeo = new THREE.SphereGeometry(0.55, 20, 20);
+    const outerMat = new THREE.MeshBasicMaterial({ color: primaryCol, transparent: true, opacity: 0.72, wireframe: true, blending: THREE.AdditiveBlending });
+    const outer = new THREE.Mesh(outerGeo, outerMat);
+    outer.position.copy(core.position);
+    this.scene.add(outer);
+
+    const flash = new THREE.PointLight(accentCol, 35, 14);
+    flash.position.copy(core.position);
+    this.scene.add(flash);
+
+    this.spawnBurst(origin, primaryCol, 65);
+    this.spawnBurst(origin, accentCol, 28);
+    this.spawnShockwave(origin, primaryCol, 2.9);
+    this.spawnShockwave(origin, accentCol, 1.9);
+
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.52,
+      update: (p) => {
+        const s = 1 + p * 3.1;
+        core.scale.setScalar(s);
+        core.material.opacity = 0.95 * (1 - p);
+        outer.scale.setScalar(1 + p * 3.8);
+        outer.rotation.y += 0.15;
+        outer.material.opacity = 0.72 * (1 - p);
+        flash.intensity = 35 * Math.pow(1 - p, 2);
+      },
+      done: () => {
+        this.scene.remove(core, outer, flash);
+        coreGeo.dispose(); coreMat.dispose();
+        outerGeo.dispose(); outerMat.dispose();
+      }
+    });
+  }
+
+  _vfxRamKnockback(defender, defenderId, dir, primaryCol, accentCol) {
+    if (!this.pieceMeshes.has(defenderId)) return;
+    this.pieceMeshes.delete(defenderId);
+    const startP = defender.group.position.clone();
+    const flyVel = dir.clone().multiplyScalar(8.5);
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.45,
+      update: (p) => {
+        defender.group.position.x = startP.x + flyVel.x * p;
+        defender.group.position.z = startP.z + flyVel.z * p;
+        defender.group.position.y = startP.y + Math.sin(p * Math.PI) * 1.6;
+        defender.group.rotation.x += 0.35;
+        defender.group.rotation.z += 0.28;
+        defender.group.scale.setScalar(Math.max(0.05, 1 - p * 0.9));
+      },
+      done: () => {
+        this.spawnBurst(defender.group.position, accentCol, 18);
+        this.scene.remove(defender.group);
+      }
+    });
+  }
+
+  _vfxPillarOfJudgment(origin, primaryCol, accentCol) {
+    const beamGeo = new THREE.CylinderGeometry(0.55, 0.85, 11, 24, 1, true);
+    const beamMat = new THREE.MeshBasicMaterial({
+      color: accentCol,
+      transparent: true,
+      opacity: 0.88,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.position.set(origin.x, 5.5, origin.z);
+    this.scene.add(beam);
+
+    const flash = new THREE.PointLight(accentCol, 32, 14);
+    flash.position.set(origin.x, 1.5, origin.z);
+    this.scene.add(flash);
+
+    this.spawnShockwave(origin, accentCol, 2.8);
+    this.spawnShockwave(origin, primaryCol, 2.0);
+    this.spawnBurst(origin, accentCol, 50);
+
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.58,
+      update: (p) => {
+        const w = 1.15 - p * 0.7;
+        beam.scale.set(w, 1, w);
+        beam.rotation.y += 0.14;
+        beam.material.opacity = 0.88 * (1 - p);
+        flash.intensity = 32 * (1 - p);
+      },
+      done: () => {
+        this.scene.remove(beam, flash);
+        beamGeo.dispose(); beamMat.dispose();
+      }
+    });
+  }
+
+  _vfxCrossSlash(origin, primaryCol, accentCol) {
+    const makeArc = (rotY, rotZ, col) => {
+      const geo = new THREE.TorusGeometry(0.95, 0.08, 8, 28, Math.PI * 0.85);
+      const mat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending });
+      const arc = new THREE.Mesh(geo, mat);
+      arc.position.set(origin.x, origin.y + 0.45, origin.z);
+      arc.rotation.set(Math.PI * 0.35, rotY, rotZ);
+      this.scene.add(arc);
+      return { arc, geo, mat };
+    };
+    const s1 = makeArc(0.7, 0.4, accentCol);
+    const s2 = makeArc(-0.7, -0.4, primaryCol);
+
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.36,
+      update: (p) => {
+        const sc = 0.6 + p * 1.45;
+        s1.arc.scale.setScalar(sc);
+        s2.arc.scale.setScalar(sc);
+        s1.arc.rotation.z += 0.22;
+        s2.arc.rotation.z -= 0.22;
+        s1.mat.opacity = 0.95 * (1 - p);
+        s2.mat.opacity = 0.95 * (1 - p);
+      },
+      done: () => {
+        this.scene.remove(s1.arc, s2.arc);
+        s1.geo.dispose(); s1.mat.dispose();
+        s2.geo.dispose(); s2.mat.dispose();
+      }
+    });
+  }
+
+  _vfxArcaneCircle(origin, primaryCol, accentCol) {
+    const group = new THREE.Group();
+    group.position.set(origin.x, 0.06, origin.z);
+    const outerGeo = new THREE.RingGeometry(0.75, 0.92, 6);
+    const innerGeo = new THREE.RingGeometry(0.45, 0.56, 6);
+    const m1 = new THREE.MeshBasicMaterial({ color: accentCol, transparent: true, opacity: 0.9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+    const m2 = new THREE.MeshBasicMaterial({ color: primaryCol, transparent: true, opacity: 0.85, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+    const r1 = new THREE.Mesh(outerGeo, m1);
+    const r2 = new THREE.Mesh(innerGeo, m2);
+    r1.rotation.x = r2.rotation.x = -Math.PI / 2;
+    r2.rotation.z = Math.PI / 6;
+    group.add(r1, r2);
+    this.scene.add(group);
+
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.62,
+      update: (p) => {
+        const sc = p < 0.7 ? (0.4 + (p / 0.7) * 1.1) : (1.5 + (p - 0.7) * 2.5);
+        group.scale.setScalar(sc);
+        group.rotation.y += 0.16;
+        const op = p < 0.7 ? 0.9 : 0.9 * (1 - (p - 0.7) / 0.3);
+        m1.opacity = op;
+        m2.opacity = op;
+      },
+      done: () => {
+        this.scene.remove(group);
+        outerGeo.dispose(); innerGeo.dispose();
+        m1.dispose(); m2.dispose();
+      }
+    });
+  }
+
+  _spawnAfterimage(pos, hexColor) {
+    const geo = new THREE.CylinderGeometry(PIECE_RADIUS * 0.95, PIECE_RADIUS, PIECE_HEIGHT, 24);
+    const mat = new THREE.MeshBasicMaterial({ color: hexColor, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending });
+    const ghost = new THREE.Mesh(geo, mat);
+    ghost.position.copy(pos);
+    this.scene.add(ghost);
+    this.animations.push({
+      elapsed: 0,
+      duration: 0.32,
+      update: (p) => {
+        ghost.material.opacity = 0.5 * (1 - p);
+        ghost.scale.setScalar(1 + p * 0.15);
+      },
+      done: () => {
+        this.scene.remove(ghost);
+        geo.dispose(); mat.dispose();
+      }
     });
   }
 

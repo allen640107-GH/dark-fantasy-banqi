@@ -291,7 +291,9 @@ async function executeAction(action) {
       res.tr,
       res.tc,
       res.isCannon,
-      res.attacker.color
+      res.attacker.color,
+      res.attacker.rank,
+      res.soldierSlaysGeneral
     );
 
     if (res.soldierSlaysGeneral) {
