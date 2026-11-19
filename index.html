@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>暗影奇譚・魔幻暗棋 | Dark Fantasy Banqi 3D</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Noto+Serif+TC:wght@500;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- 3D WebGL Canvas Container -->
+  <div id="canvas-container"></div>
+
+  <!-- Intro Video Overlay -->
+  <div id="intro-overlay" class="overlay active">
+    <div id="intro-gate" class="intro-gate">
+      <div class="gate-crest-row">
+        <img src="assets/portraits/r_emblem.png" alt="烈焰聖殿" class="gate-crest crimson" />
+        <span class="gate-vs">VS</span>
+        <img src="assets/portraits/b_emblem.png" alt="冥淵暗影" class="gate-crest abyssal" />
+      </div>
+      <h1 class="epic-title">暗影奇譚・魔幻暗棋</h1>
+      <p class="epic-subtitle">DARK FANTASY BANQI 3D</p>
+      <div class="gate-actions">
+        <button id="btn-play-intro" class="btn-epic primary">播放史詩片頭並進入</button>
+        <button id="btn-skip-gate" class="btn-epic secondary">直接進入選單</button>
+      </div>
+    </div>
+
+    <div id="video-stage" class="video-stage hidden">
+      <video id="intro-video" playsinline preload="auto">
+        <source src="assets/video/intro.mp4" type="video/mp4" />
+      </video>
+      <button id="btn-skip-video" class="btn-skip">跳過片頭 ⏭</button>
+    </div>
+  </div>
+
+  <!-- Main Menu Overlay -->
+  <div id="menu-overlay" class="overlay hidden">
+    <div class="obsidian-card menu-card">
+      <div class="menu-header">
+        <span class="badge-tag">3D 寫實奇幻戰棋</span>
+        <h1 class="epic-title small">暗影奇譚・魔幻暗棋</h1>
+        <p class="menu-desc">烈焰聖殿與冥淵暗影的宿命對決——翻開命運之棋，運籌帷幄。</p>
+      </div>
+
+      <div class="menu-section">
+        <label class="section-label">對戰模式</label>
+        <div class="seg-group" id="mode-group">
+          <button class="seg-btn active" data-mode="pve">單人對戰 AI</button>
+          <button class="seg-btn" data-mode="pvp">雙人同機對戰</button>
+        </div>
+      </div>
+
+      <div class="menu-section" id="difficulty-section">
+        <label class="section-label">AI 戰術難度</label>
+        <div class="seg-group" id="diff-group">
+          <button class="seg-btn" data-diff="easy">簡單</button>
+          <button class="seg-btn active" data-diff="medium">普通</button>
+          <button class="seg-btn" data-diff="hard">困難</button>
+        </div>
+      </div>
+
+      <div class="menu-section">
+        <label class="toggle-row">
+          <span>
+            <strong>進階規則：暗棋連吃（連殺）</strong>
+            <small>吃子後若可繼續吃敵棋，允許連續追擊</small>
+          </span>
+          <input type="checkbox" id="chk-chain-capture" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="menu-actions">
+        <button id="btn-start-game" class="btn-epic primary full">開啟戰局</button>
+        <button id="btn-replay-intro" class="btn-epic ghost full">重播片頭影片</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-Game HUD -->
+  <div id="hud" class="hud hidden">
+    <!-- Top Bar -->
+    <header class="hud-top">
+      <div class="hud-brand">
+        <span class="brand-title">暗影奇譚</span>
+        <span class="brand-mode" id="hud-mode-badge">單人・普通</span>
+      </div>
+
+      <div class="turn-banner" id="turn-banner">
+        <span class="turn-dot" id="turn-dot"></span>
+        <span class="turn-text" id="turn-text">請翻開第一枚命運之棋</span>
+        <span class="turn-sub" id="turn-sub">和局計數 0/50</span>
+      </div>
+
+      <div class="hud-controls">
+        <button id="btn-end-chain" class="hud-btn accent hidden" title="結束連續吃子">結束連吃</button>
+        <button id="btn-camera" class="hud-btn" title="切換視角">🎥 視角：斜視</button>
+        <button id="btn-bgm" class="hud-btn active" title="開關背景音樂">🎵 音樂</button>
+        <button id="btn-sfx" class="hud-btn active" title="開關音效與配音">🔊 語音</button>
+        <button id="btn-undo" class="hud-btn" title="悔棋">↩ 悔棋</button>
+        <button id="btn-restart" class="hud-btn" title="重新開局">↻ 重開</button>
+        <button id="btn-menu" class="hud-btn" title="返回選單">☰ 選單</button>
+      </div>
+    </header>
+
+    <!-- Left Side: Red Faction Captured (Dead Red Pieces) -->
+    <aside class="graveyard left" id="red-graveyard">
+      <div class="grave-header crimson">
+        <img src="assets/portraits/r_emblem.png" alt="紅方" />
+        <div>
+          <div class="grave-title">烈焰聖殿</div>
+          <div class="grave-count" id="red-alive-count">存活 16</div>
+        </div>
+      </div>
+      <div class="grave-label">已陣亡紅棋</div>
+      <div class="grave-grid" id="red-dead-list"></div>
+    </aside>
+
+    <!-- Right Side: Black Faction Captured (Dead Black Pieces) -->
+    <aside class="graveyard right" id="black-graveyard">
+      <div class="grave-header abyssal">
+        <img src="assets/portraits/b_emblem.png" alt="黑方" />
+        <div>
+          <div class="grave-title">冥淵暗影</div>
+          <div class="grave-count" id="black-alive-count">存活 16</div>
+        </div>
+      </div>
+      <div class="grave-label">已陣亡黑棋</div>
+      <div class="grave-grid" id="black-dead-list"></div>
+    </aside>
+
+    <!-- Bottom Status / Selected Piece Inspector -->
+    <footer class="hud-bottom">
+      <div class="inspector-card hidden" id="inspector-card">
+        <img id="inspector-img" src="" alt="" />
+        <div class="inspector-info">
+          <div class="inspector-name-row">
+            <span id="inspector-char" class="inspector-char">帥</span>
+            <span id="inspector-title" class="inspector-title">烈焰大元帥</span>
+          </div>
+          <div id="inspector-desc" class="inspector-desc">可吃除兵卒外所有敵軍</div>
+        </div>
+      </div>
+      <div class="hint-pill" id="hint-pill">左鍵點選翻棋或移動・右鍵拖曳可微調視角</div>
+    </footer>
+  </div>
+
+  <!-- Dramatic Hero Cut-in Overlay -->
+  <div id="cutin-overlay" class="cutin-overlay hidden">
+    <div class="cutin-banner" id="cutin-banner">
+      <img id="cutin-img" src="" alt="" class="cutin-portrait" />
+      <div class="cutin-text">
+        <div class="cutin-tag" id="cutin-tag">烈焰聖殿・帥</div>
+        <div class="cutin-quote" id="cutin-quote">「三軍聽令，以烈焰焚盡宵小！」</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game Over Modal -->
+  <div id="gameover-overlay" class="overlay hidden">
+    <div class="obsidian-card gameover-card">
+      <img id="gameover-crest" src="assets/portraits/r_emblem.png" alt="" class="gameover-crest" />
+      <h2 id="gameover-title" class="epic-title small">烈焰聖殿 獲勝！</h2>
+      <p id="gameover-desc" class="menu-desc">紅方徹底殲滅敵軍，主宰了暗影戰場。</p>
+      <div class="gameover-stats" id="gameover-stats">總回合數：0</div>
+      <div class="menu-actions">
+        <button id="btn-play-again" class="btn-epic primary full">再戰一局</button>
+        <button id="btn-back-menu" class="btn-epic ghost full">返回主選單</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
