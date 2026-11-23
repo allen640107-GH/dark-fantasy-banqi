@@ -74,37 +74,55 @@ narration = os.path.join(AUDIO_DIR, "voice", "intro_narration.mp3")
 gong = os.path.join(AUDIO_DIR, "sfx", "gong.mp3")
 bgm = os.path.join(AUDIO_DIR, "sfx", "bgm.mp3")
 
-title_start = max(3.5, dur - 2.9)
-fade_out_st = max(5.0, dur - 0.85)
-gong_ms = int(title_start * 1000)
+# Probe exact narration duration so every single word finishes cleanly before fade-out!
+nar_dur = float(subprocess.check_output([
+    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+    "-of", "default=noprint_wrappers=1:nokey=1", narration
+], text=True).strip())
 
-# Compose live-action video + subtle title fade-in + cinematic letterbox + fade-in/out + audio mix
+# Epic 1.40x cinematic slow-mo on the 8.04s Flow clip (~11.26s) + graceful final title hold
+slow_factor = 1.40
+slowed_dur = dur * slow_factor
+nar_delay_s = 0.25
+total_dur = max(slowed_dur + 1.5, nar_dur + nar_delay_s + 1.1)
+pad_dur = max(0.5, total_dur - slowed_dur)
+
+title_start = max(6.5, total_dur - 4.2)
+fade_out_st = total_dur - 0.9
+gong_ms = int(title_start * 1000)
+nar_delay_ms = int(nar_delay_s * 1000)
+
+# Compose epic slow-motion live-action video + smooth title reveal + fade-in/out
 v_filter = (
-    f"[0:v]fade=t=in:st=0:d=0.45,fade=t=out:st={fade_out_st:.2f}:d=0.85[base];"
-    f"[1:v]format=rgba,fade=t=in:st={title_start:.2f}:d=0.65:alpha=1,fade=t=out:st={fade_out_st:.2f}:d=0.8:alpha=1[ttl];"
+    f"[0:v]setpts={slow_factor:.2f}*PTS,tpad=stop_mode=clone:stop_duration={pad_dur:.2f},"
+    f"trim=0:{total_dur:.2f},setpts=PTS-STARTPTS,"
+    f"fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out_st:.2f}:d=0.9[base];"
+    f"[1:v]format=rgba,fade=t=in:st={title_start:.2f}:d=0.8:alpha=1,fade=t=out:st={fade_out_st:.2f}:d=0.85:alpha=1[ttl];"
     f"[base][ttl]overlay=0:0:shortest=1[vout]"
 )
 
+# Full natural-speed Neural TTS narration (NO speedup, NO cutoff!) + subtle slowed ambient + gong + war-drum BGM
 if has_audio:
     a_filter = (
-        f"[0:a]volume=0.72,afade=t=out:st={fade_out_st:.2f}:d=0.85[orig];"
-        f"[2:a]atempo=1.18,adelay=200|200,volume=1.12[nar];"
-        f"[3:a]adelay={gong_ms}|{gong_ms},volume=0.48[gng];"
-        f"[4:a]atrim=0:{dur:.2f},afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out_st:.2f}:d=0.85,volume=0.32[bg];"
+        f"[0:a]atempo={1.0/slow_factor:.3f},apad=whole_dur={total_dur:.2f},atrim=0:{total_dur:.2f},"
+        f"volume=0.58,afade=t=out:st={fade_out_st:.2f}:d=0.9[orig];"
+        f"[2:a]adelay={nar_delay_ms}|{nar_delay_ms},apad=whole_dur={total_dur:.2f},atrim=0:{total_dur:.2f},volume=1.18[nar];"
+        f"[3:a]adelay={gong_ms}|{gong_ms},apad=whole_dur={total_dur:.2f},atrim=0:{total_dur:.2f},volume=0.52[gng];"
+        f"[4:a]atrim=0:{total_dur:.2f},afade=t=in:st=0:d=0.6,afade=t=out:st={fade_out_st:.2f}:d=0.9,volume=0.35[bg];"
         f"[orig][nar][gng][bg]amix=inputs=4:duration=first:normalize=0[aout]"
     )
 else:
     a_filter = (
-        f"[2:a]atempo=1.18,adelay=200|200,volume=1.18[nar];"
-        f"[3:a]adelay={gong_ms}|{gong_ms},volume=0.55[gng];"
-        f"[4:a]atrim=0:{dur:.2f},afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out_st:.2f}:d=0.85,volume=0.42[bg];"
+        f"[2:a]adelay={nar_delay_ms}|{nar_delay_ms},apad=whole_dur={total_dur:.2f},atrim=0:{total_dur:.2f},volume=1.2[nar];"
+        f"[3:a]adelay={gong_ms}|{gong_ms},apad=whole_dur={total_dur:.2f},atrim=0:{total_dur:.2f},volume=0.55[gng];"
+        f"[4:a]atrim=0:{total_dur:.2f},afade=t=in:st=0:d=0.6,afade=t=out:st={fade_out_st:.2f}:d=0.9,volume=0.40[bg];"
         f"[nar][gng][bg]amix=inputs=3:duration=first:normalize=0[aout]"
     )
 
 subprocess.run([
     "ffmpeg", "-y", "-loglevel", "error",
     "-i", RAW_MP4,
-    "-loop", "1", "-t", f"{dur:.2f}", "-i", TITLE_PNG,
+    "-loop", "1", "-t", f"{total_dur:.2f}", "-i", TITLE_PNG,
     "-i", narration,
     "-i", gong,
     "-i", bgm,
@@ -112,7 +130,7 @@ subprocess.run([
     "-map", "[vout]", "-map", "[aout]",
     "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "192k",
-    "-movflags", "+faststart", "-shortest",
+    "-movflags", "+faststart", "-t", f"{total_dur:.2f}",
     OUT_MP4
 ], check=True)
 
