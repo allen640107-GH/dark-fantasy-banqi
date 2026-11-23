@@ -653,8 +653,22 @@ export class BanqiGame {
       }
     }
 
+    // Check if any friendly piece is currently under direct enemy attack (if so, don't reward blind flipping!)
+    let underThreat = false;
+    for (let rr = 0; rr < ROWS && !underThreat; rr++) {
+      for (let cc = 0; cc < COLS && !underThreat; cc++) {
+        const ep = board[rr][cc];
+        if (ep && ep.revealed && ep.color === enemy) {
+          const caps = this.getValidMovesForPiece(rr, cc, board, true);
+          if (caps.length > 0) underThreat = true;
+        }
+      }
+    }
+
     const avgDelta = expectedDelta / pool.length;
-    const exploreBias = godMode ? (pool.length > 10 ? 7 : 2) : (advanced ? (pool.length > 12 ? 8 : 3.5) : 9);
+    const exploreBias = underThreat
+      ? -6
+      : (godMode ? (pool.length > 10 ? 6 : 1.5) : (advanced ? (pool.length > 12 ? 7 : 3) : 8));
     const jitter = godMode ? 0.08 : (advanced ? 0.3 : 1.2);
     return exploreBias + avgDelta + Math.random() * jitter;
   }
