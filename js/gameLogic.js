@@ -494,17 +494,17 @@ export class BanqiGame {
     };
 
     for (const m of myPieces) {
-      score += dynVal(m.p, true) * 1.25;
+      score += dynVal(m.p, true) * 1.6;
       if (advanced) {
         const centerDist = Math.abs(m.r - 1.5) + Math.abs(m.c - 3.5);
-        score += Math.max(0, 4.2 - centerDist) * 1.1;
+        score += Math.max(0, 4.2 - centerDist) * 0.6;
       }
     }
     for (const e of enemyPieces) {
-      score -= dynVal(e.p, false) * 1.25;
+      score -= dynVal(e.p, false) * 1.6;
       if (advanced) {
         const centerDist = Math.abs(e.r - 1.5) + Math.abs(e.c - 3.5);
-        score -= Math.max(0, 4.2 - centerDist) * 0.9;
+        score -= Math.max(0, 4.2 - centerDist) * 0.5;
       }
     }
 
@@ -514,30 +514,30 @@ export class BanqiGame {
       const allM = this.getValidMovesForPiece(m.r, m.c, board, false);
       const caps = allM.filter(x => x.type === 'capture');
       if (advanced) {
-        score += allM.length * 1.2;
-        if (caps.length >= 2) score += 18; // Double threat (fork)!
+        score += allM.length * 1.0;
+        if (caps.length >= 2) score += 16; // Double threat (fork)!
       }
       for (const mv of caps) {
         const target = board[mv.tr][mv.tc];
-        if (target) score += dynVal(target, false) * (godMode ? 0.30 : 0.22);
+        if (target) score += dynVal(target, false) * (godMode ? 0.16 : 0.12);
       }
 
-      // Predator-prey chasing & corner trapping
+      // Predator-prey chasing & corner trapping (kept strictly smaller than material value!)
       for (const e of enemyPieces) {
         const dist = Math.abs(m.r - e.r) + Math.abs(m.c - e.c);
         if (canCaptureRank(m.p.rank, e.p.rank)) {
-          const chaseWeight = hiddenCount === 0 ? (godMode ? 4.8 : 3.5) : (advanced ? 2.2 : 1.4);
+          const chaseWeight = hiddenCount === 0 ? (godMode ? 4.5 : 3.2) : (advanced ? 1.8 : 1.2);
           score += Math.max(0, 10 - dist) * chaseWeight;
           if (advanced && (e.r === 0 || e.r === ROWS - 1 || e.c === 0 || e.c === COLS - 1)) {
-            score += (hiddenCount === 0 ? 6.0 : 2.5);
+            score += (hiddenCount === 0 ? 5.5 : 2.0);
           }
         } else if (advanced && canCaptureRank(e.p.rank, m.p.rank) && dist <= 2) {
-          score -= dynVal(m.p, true) * (dist === 1 ? 0.42 : 0.12);
+          score -= dynVal(m.p, true) * (dist === 1 ? 0.14 : 0.04);
         }
       }
     }
 
-    // Enemy attacks & Cannon sniper threats on our high-value pieces
+    // Enemy attacks & Cannon sniper threats (subtle penalty since Quiescence Search plays out actual captures!)
     for (const e of enemyPieces) {
       const eAll = this.getValidMovesForPiece(e.r, e.c, board, false);
       enemyTotalMoves += eAll.length;
@@ -545,7 +545,7 @@ export class BanqiGame {
         if (mv.type === 'capture') {
           const target = board[mv.tr][mv.tc];
           if (target && target.color === aiColor) {
-            score -= dynVal(target, true) * (godMode ? 0.68 : (advanced ? 0.56 : 0.42));
+            score -= dynVal(target, true) * (godMode ? 0.22 : (advanced ? 0.18 : 0.15));
           }
         }
       }
@@ -920,6 +920,8 @@ export class BanqiGame {
           workBoard[act.fr][act.fc] = null;
 
           score = alphaBeta(workBoard, d - 1, -Infinity, Infinity, false);
+          // Slight immediate-capture bonus so taking a guaranteed kill NOW beats delaying it!
+          if (captured) score += 3.5;
 
           // Anti-repetition logic: avoid shuffling in circles when winning, allow draw defense when losing!
           if (!captured) {
