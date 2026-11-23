@@ -340,7 +340,7 @@ export class BanqiGame {
     }
   }
 
-  // ===================== 5-Tier AI (入門 / 普通 / 困難 / 宗師 / 地獄) =====================
+  // ===================== 6-Tier AI (入門 / 普通 / 困難 / 宗師 / 地獄 / 神域) =====================
   chooseAiAction() {
     const color = this.aiColor;
     if (!color || this.gameOver) return null;
@@ -360,9 +360,11 @@ export class BanqiGame {
 
     if (this.difficulty === 'easy') return this._aiEasy(actions);
     if (this.difficulty === 'medium') return this._aiMedium(color, actions);
-    if (this.difficulty === 'hard') return this._aiSearch(color, actions, 2, false, 200);
-    if (this.difficulty === 'master') return this._aiSearch(color, actions, 3, true, 420);
-    return this._aiSearch(color, actions, 4, true, 750); // 'abyss' (地獄級：深度5層含靜態吃子搜尋+記牌精算)
+    if (this.difficulty === 'hard') return this._aiSearchPro(color, actions, { maxDepth: 3, qDepth: 2, budgetMs: 220, advanced: false, deepFlip: false });
+    if (this.difficulty === 'master') return this._aiSearchPro(color, actions, { maxDepth: 5, qDepth: 3, budgetMs: 420, advanced: true, deepFlip: false });
+    if (this.difficulty === 'abyss') return this._aiSearchPro(color, actions, { maxDepth: 7, qDepth: 4, budgetMs: 720, advanced: true, deepFlip: true });
+    // 'god' (神域級：最高深度8層迭代加深 + 置換表 + 靜態吃子搜尋 + 炮架/暗子全期望值精算)
+    return this._aiSearchPro(color, actions, { maxDepth: 8, qDepth: 5, budgetMs: 1100, advanced: true, deepFlip: true, godMode: true });
   }
 
   _aiEasy(actions) {
@@ -388,7 +390,43 @@ export class BanqiGame {
     return pool;
   }
 
-  _evaluateBoard(board, aiColor, advanced = false) {
+  _boardHashKey(board, turnColor) {
+    // Fast compact position key for transposition table & repetition avoidance
+    let key = turnColor === 'red' ? 'R:' : 'B:';
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const p = board[r][c];
+        if (!p) key += '.';
+        else if (!p.revealed) key += '?';
+        else key += (p.color === 'red' ? String.fromCharCode(65 + p.rank) : String.fromCharCode(97 + p.rank));
+      }
+    }
+    return key;
+  }
+
+  _isAttackedByEnemyCannon(board, tr, tc, enemyColor) {
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (const [dr, dc] of dirs) {
+      let nr = tr + dr, nc = tc + dc;
+      let screenFound = false;
+      while (this.inBounds(nr, nc)) {
+        const cell = board[nr][nc];
+        if (cell) {
+          if (!screenFound) {
+            screenFound = true;
+          } else {
+            if (cell.revealed && cell.color === enemyColor && cell.rank === 1) return true;
+            break;
+          }
+        }
+        nr += dr;
+        nc += dc;
+      }
+    }
+    return false;
+  }
+
+  _evaluateBoard(board, aiColor, advanced = false, godMode = false) {
     const enemy = aiColor === 'red' ? 'black' : 'red';
     let score = 0;
     const myPieces = [];
@@ -397,89 +435,125 @@ export class BanqiGame {
     let myHasGeneral = false;
     let enemyHasSoldiers = 0;
     let myHasSoldiers = 0;
+    let enemyHasCannons = 0;
+    let myHasCannons = 0;
+    let hiddenCount = 0;
 
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
         const p = board[r][c];
-        if (!p || !p.revealed) continue;
+        if (!p) continue;
+        if (!p.revealed) {
+          hiddenCount++;
+          continue;
+        }
         if (p.color === aiColor) {
           myPieces.push({ r, c, p });
           if (p.rank === 6) myHasGeneral = true;
           if (p.rank === 0) myHasSoldiers++;
+          if (p.rank === 1) myHasCannons++;
         } else {
           enemyPieces.push({ r, c, p });
           if (p.rank === 6) enemyHasGeneral = true;
           if (p.rank === 0) enemyHasSoldiers++;
+          if (p.rank === 1) enemyHasCannons++;
         }
       }
     }
 
-    // Dynamic piece valuation (Soldiers become much more valuable while enemy General lives!)
+    // Terminal win/loss detection when no hidden pieces remain
+    if (hiddenCount === 0) {
+      if (enemyPieces.length === 0) return 100000;
+      if (myPieces.length === 0) return -100000;
+    }
+
+    const totalPieces = myPieces.length + enemyPieces.length + hiddenCount;
+
+    // Dynamic Banqi piece valuation
     const dynVal = (p, isMine) => {
       let v = p.meta.value;
       if (advanced) {
         if (p.rank === 0) {
           const oppGen = isMine ? enemyHasGeneral : myHasGeneral;
-          v = oppGen ? 34 : 15;
+          v = oppGen ? 42 : 16;
         } else if (p.rank === 1) {
-          // Cannons shine when many pieces remain as screens
-          const totalOnBoard = myPieces.length + enemyPieces.length;
-          v = totalOnBoard >= 10 ? 64 : 46;
+          // Cannons are lethal when screens exist, weaker in sparse endgames
+          v = totalPieces >= 12 ? 72 : (totalPieces >= 6 ? 56 : 36);
         } else if (p.rank === 6) {
           const oppSoldiers = isMine ? enemyHasSoldiers : myHasSoldiers;
-          v = oppSoldiers === 0 ? 135 : 105; // Invincible General when no enemy soldiers left!
+          const oppCannons = isMine ? enemyHasCannons : myHasCannons;
+          if (oppSoldiers === 0 && oppCannons === 0 && hiddenCount === 0) v = 185; // Unkillable god General!
+          else if (oppSoldiers === 0) v = 140;
+          else v = 108;
+        } else if (p.rank === 5) {
+          const oppGen = isMine ? enemyHasGeneral : myHasGeneral;
+          v = (!oppGen && hiddenCount === 0) ? 88 : 68;
         }
       }
       return v;
     };
 
     for (const m of myPieces) {
-      score += dynVal(m.p, true) * 1.15;
-      // Slight center control bonus
+      score += dynVal(m.p, true) * 1.25;
       if (advanced) {
         const centerDist = Math.abs(m.r - 1.5) + Math.abs(m.c - 3.5);
-        score += Math.max(0, 4 - centerDist) * 0.8;
+        score += Math.max(0, 4.2 - centerDist) * 1.1;
       }
     }
     for (const e of enemyPieces) {
-      score -= dynVal(e.p, false) * 1.15;
+      score -= dynVal(e.p, false) * 1.25;
+      if (advanced) {
+        const centerDist = Math.abs(e.r - 1.5) + Math.abs(e.c - 3.5);
+        score -= Math.max(0, 4.2 - centerDist) * 0.9;
+      }
     }
 
-    // Mobility, Attack Threats, Double-Threat (Fork) & Endgame Chase
+    // Mobility, Forking, Cannon Alignment & Endgame Corner Trapping
+    let enemyTotalMoves = 0;
     for (const m of myPieces) {
-      const caps = this.getValidMovesForPiece(m.r, m.c, board, true);
-      if (advanced && caps.length >= 2) {
-        score += 12; // Fork / double threat bonus
+      const allM = this.getValidMovesForPiece(m.r, m.c, board, false);
+      const caps = allM.filter(x => x.type === 'capture');
+      if (advanced) {
+        score += allM.length * 1.2;
+        if (caps.length >= 2) score += 18; // Double threat (fork)!
       }
       for (const mv of caps) {
         const target = board[mv.tr][mv.tc];
-        if (target) score += dynVal(target, false) * (advanced ? 0.24 : 0.16);
+        if (target) score += dynVal(target, false) * (godMode ? 0.30 : 0.22);
       }
 
-      // Endgame & midgame hunting pressure: push predators toward prey, pull prey away from predators
+      // Predator-prey chasing & corner trapping
       for (const e of enemyPieces) {
         const dist = Math.abs(m.r - e.r) + Math.abs(m.c - e.c);
         if (canCaptureRank(m.p.rank, e.p.rank)) {
-          score += Math.max(0, 10 - dist) * (advanced ? 2.2 : 1.4);
-          // Trap weaker enemy near corners/edges
+          const chaseWeight = hiddenCount === 0 ? (godMode ? 4.8 : 3.5) : (advanced ? 2.2 : 1.4);
+          score += Math.max(0, 10 - dist) * chaseWeight;
           if (advanced && (e.r === 0 || e.r === ROWS - 1 || e.c === 0 || e.c === COLS - 1)) {
-            score += 2.5;
+            score += (hiddenCount === 0 ? 6.0 : 2.5);
           }
         } else if (advanced && canCaptureRank(e.p.rank, m.p.rank) && dist <= 2) {
-          score -= dynVal(m.p, true) * (dist === 1 ? 0.35 : 0.1);
+          score -= dynVal(m.p, true) * (dist === 1 ? 0.42 : 0.12);
         }
       }
     }
 
-    // Penalize friendly pieces currently under direct enemy attack (stronger penalty in master/abyss)
+    // Enemy attacks & Cannon sniper threats on our high-value pieces
     for (const e of enemyPieces) {
-      const eCaps = this.getValidMovesForPiece(e.r, e.c, board, true);
-      for (const mv of eCaps) {
-        const target = board[mv.tr][mv.tc];
-        if (target && target.color === aiColor) {
-          score -= dynVal(target, true) * (advanced ? 0.58 : 0.42);
+      const eAll = this.getValidMovesForPiece(e.r, e.c, board, false);
+      enemyTotalMoves += eAll.length;
+      for (const mv of eAll) {
+        if (mv.type === 'capture') {
+          const target = board[mv.tr][mv.tc];
+          if (target && target.color === aiColor) {
+            score -= dynVal(target, true) * (godMode ? 0.68 : (advanced ? 0.56 : 0.42));
+          }
         }
       }
+    }
+
+    // Endgame Zugzwang: heavily reward restricting opponent's legal moves when winning!
+    if (advanced && hiddenCount <= 4 && score > 0) {
+      score += Math.max(0, 14 - enemyTotalMoves) * (godMode ? 3.5 : 2.0);
     }
 
     return score;
@@ -528,8 +602,8 @@ export class BanqiGame {
     return bestActions[Math.floor(Math.random() * bestActions.length)];
   }
 
-  _scoreFlipExpectimax(board, r, c, color, advanced) {
-    // Card-counting expectation for flipping a hidden tile at (r, c)
+  _scoreFlipExpectimax(board, r, c, color, advanced, godMode = false) {
+    const enemy = color === 'red' ? 'black' : 'red';
     const pool = this._getUnrevealedPool(board);
     if (pool.length === 0) return -999;
 
@@ -546,50 +620,105 @@ export class BanqiGame {
       }
     }
 
-    // Evaluate expected immediate outcome against the true remaining unrevealed deck!
+    // Check if this tile sits in an enemy Cannon's immediate jump-shot crosshair!
+    const inEnemyCannonLine = this._isAttackedByEnemyCannon(board, r, c, enemy);
+    const inMyCannonLine = this._isAttackedByEnemyCannon(board, r, c, color);
+
     let expectedDelta = 0;
     for (const cand of pool) {
       if (cand.color === color) {
-        // Revealed a friendly piece: good unless an adjacent enemy can immediately eat it!
-        let eatenRisk = false;
+        let eatenRisk = inEnemyCannonLine;
         for (const e of adjEnemy) {
           if (canCaptureRank(e.rank, cand.rank)) eatenRisk = true;
         }
-        expectedDelta += eatenRisk ? -cand.meta.value * 0.65 : cand.meta.value * 0.25;
+        expectedDelta += eatenRisk ? -cand.meta.value * 0.85 : cand.meta.value * 0.34;
       } else {
-        // Revealed an enemy piece: bad if it can immediately eat our adjacent high-value piece!
+        // Enemy revealed: check if it immediately kills our adjacent piece!
         let threatCost = 0;
         for (const f of adjFriendly) {
           if (canCaptureRank(cand.rank, f.rank)) {
-            threatCost = Math.max(threatCost, f.meta.value * 0.75);
+            threatCost = Math.max(threatCost, f.meta.value * 0.92);
           }
         }
         expectedDelta -= threatCost;
-        // Bonus if our adjacent friendly piece can trap/eat it next
+        // Bonus if our cannon or adjacent strong piece can immediately snipe/trap it
+        if (inMyCannonLine) {
+          expectedDelta += cand.meta.value * 0.42;
+        }
         for (const f of adjFriendly) {
           if (canCaptureRank(f.rank, cand.rank) && !canCaptureRank(cand.rank, f.rank)) {
-            expectedDelta += cand.meta.value * 0.15;
+            expectedDelta += cand.meta.value * 0.22;
           }
         }
       }
     }
 
     const avgDelta = expectedDelta / pool.length;
-    // Slight bonus for flipping early when board has many dark pieces, smaller jitter in master/abyss
-    const exploreBias = advanced ? (pool.length > 12 ? 9 : 4) : 10;
-    return exploreBias + avgDelta + (advanced ? Math.random() * 0.4 : Math.random() * 1.5);
+    const exploreBias = godMode ? (pool.length > 10 ? 7 : 2) : (advanced ? (pool.length > 12 ? 8 : 3.5) : 9);
+    const jitter = godMode ? 0.08 : (advanced ? 0.3 : 1.2);
+    return exploreBias + avgDelta + Math.random() * jitter;
   }
 
-  _aiSearch(color, actions, maxDepth, advanced, timeBudgetMs) {
+  _aiSearchPro(color, actions, cfg) {
+    const { maxDepth, qDepth, budgetMs, advanced, deepFlip, godMode = false } = cfg;
     const enemy = color === 'red' ? 'black' : 'red';
     const startTime = performance.now();
     let timedOut = false;
+    let nodeCount = 0;
 
-    const quiescence = (board, alpha, beta, maximizing, qDepth) => {
-      const standPat = this._evaluateBoard(board, color, advanced);
-      if (qDepth <= 0 || performance.now() - startTime > timeBudgetMs) return standPat;
+    // Transposition Table: hash -> { depth, score, flag }
+    // flag: 0 = EXACT, 1 = LOWERBOUND, 2 = UPPERBOUND
+    const tt = new Map();
 
-      const turn = maximizing ? color : enemy;
+    // Recent position hashes from history to prevent pointless endgame shuffle loops
+    const recentHashes = new Set();
+    const recentSlice = this.history.slice(-10);
+    for (const snap of recentSlice) {
+      if (snap && snap.board) {
+        recentHashes.add(this._boardHashKey(snap.board, snap.turnColor));
+      }
+    }
+
+    // Work on one cloned board using ultra-fast in-place make/unmake (zero GC pressure!)
+    const workBoard = this.cloneBoard(this.board);
+
+    const checkTime = () => {
+      nodeCount++;
+      if ((nodeCount & 127) === 0 && performance.now() - startTime > budgetMs) {
+        timedOut = true;
+      }
+      return timedOut;
+    };
+
+    const getMovesOrdered = (board, turn, capturesOnly) => {
+      const moves = [];
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const p = board[r][c];
+          if (p && p.revealed && p.color === turn) {
+            moves.push(...this.getValidMovesForPiece(r, c, board, capturesOnly));
+          }
+        }
+      }
+      if (moves.length > 1) {
+        // MVV-LVA (Most Valuable Victim - Least Valuable Attacker) move ordering!
+        moves.sort((a, b) => {
+          const va = a.type === 'capture'
+            ? 500 + (board[a.tr][a.tc]?.meta.value || 10) * 4 - (board[a.fr][a.fc]?.meta.value || 0) * 0.3
+            : 0;
+          const vb = b.type === 'capture'
+            ? 500 + (board[b.tr][b.tc]?.meta.value || 10) * 4 - (board[b.fr][b.fc]?.meta.value || 0) * 0.3
+            : 0;
+          return vb - va;
+        });
+      }
+      return moves;
+    };
+
+    const quiescence = (board, alpha, beta, maximizing, qLeft) => {
+      const standPat = this._evaluateBoard(board, color, advanced, godMode);
+      if (qLeft <= 0 || checkTime()) return standPat;
+
       if (maximizing) {
         if (standPat >= beta) return beta;
         if (standPat > alpha) alpha = standPat;
@@ -598,22 +727,24 @@ export class BanqiGame {
         if (standPat < beta) beta = standPat;
       }
 
-      const caps = [];
-      for (let r = 0; r < ROWS; r++) {
-        for (let c = 0; c < COLS; c++) {
-          const p = board[r][c];
-          if (p && p.revealed && p.color === turn) {
-            caps.push(...this.getValidMovesForPiece(r, c, board, true));
-          }
-        }
-      }
+      const turn = maximizing ? color : enemy;
+      const caps = getMovesOrdered(board, turn, true);
       if (caps.length === 0) return standPat;
-      caps.sort((a, b) => (board[b.tr][b.tc]?.meta.value || 0) - (board[a.tr][a.tc]?.meta.value || 0));
 
       if (maximizing) {
         let best = standPat;
         for (const mv of caps) {
-          const v = quiescence(this._simulateMove(board, mv), alpha, beta, false, qDepth - 1);
+          const mover = board[mv.fr][mv.fc];
+          const captured = board[mv.tr][mv.tc];
+          board[mv.tr][mv.tc] = mover;
+          board[mv.fr][mv.fc] = null;
+
+          const v = quiescence(board, alpha, beta, false, qLeft - 1);
+
+          board[mv.fr][mv.fc] = mover;
+          board[mv.tr][mv.tc] = captured;
+
+          if (timedOut) return best;
           if (v > best) best = v;
           if (best > alpha) alpha = best;
           if (beta <= alpha) break;
@@ -622,7 +753,17 @@ export class BanqiGame {
       } else {
         let best = standPat;
         for (const mv of caps) {
-          const v = quiescence(this._simulateMove(board, mv), alpha, beta, true, qDepth - 1);
+          const mover = board[mv.fr][mv.fc];
+          const captured = board[mv.tr][mv.tc];
+          board[mv.tr][mv.tc] = mover;
+          board[mv.fr][mv.fc] = null;
+
+          const v = quiescence(board, alpha, beta, true, qLeft - 1);
+
+          board[mv.fr][mv.fc] = mover;
+          board[mv.tr][mv.tc] = captured;
+
+          if (timedOut) return best;
           if (v < best) best = v;
           if (best < beta) beta = best;
           if (beta <= alpha) break;
@@ -632,74 +773,134 @@ export class BanqiGame {
     };
 
     const alphaBeta = (board, depth, alpha, beta, maximizing) => {
-      if (performance.now() - startTime > timeBudgetMs) {
-        timedOut = true;
-        return this._evaluateBoard(board, color, advanced);
-      }
-      if (depth === 0) {
-        return advanced ? quiescence(board, alpha, beta, maximizing, 2) : this._evaluateBoard(board, color, false);
-      }
+      if (checkTime()) return this._evaluateBoard(board, color, advanced, godMode);
+
       const turn = maximizing ? color : enemy;
-      const moves = [];
-      for (let r = 0; r < ROWS; r++) {
-        for (let c = 0; c < COLS; c++) {
-          const p = board[r][c];
-          if (p && p.revealed && p.color === turn) {
-            moves.push(...this.getValidMovesForPiece(r, c, board, false));
-          }
-        }
+      const hash = this._boardHashKey(board, turn);
+      const origAlpha = alpha;
+      const origBeta = beta;
+
+      const cached = tt.get(hash);
+      if (cached && cached.depth >= depth) {
+        if (cached.flag === 0) return cached.score;
+        if (cached.flag === 1 && cached.score > alpha) alpha = cached.score;
+        else if (cached.flag === 2 && cached.score < beta) beta = cached.score;
+        if (alpha >= beta) return cached.score;
       }
-      if (moves.length === 0) return this._evaluateBoard(board, color, advanced);
 
-      // Move ordering: high-value captures first -> dramatically faster alpha-beta pruning
-      moves.sort((a, b) => {
-        const va = a.type === 'capture' ? (board[a.tr][a.tc]?.meta.value || 10) + 50 : 0;
-        const vb = b.type === 'capture' ? (board[b.tr][b.tc]?.meta.value || 10) + 50 : 0;
-        return vb - va;
-      });
+      if (depth <= 0) {
+        return advanced ? quiescence(board, alpha, beta, maximizing, qDepth) : this._evaluateBoard(board, color, false, false);
+      }
 
+      const moves = getMovesOrdered(board, turn, false);
+      if (moves.length === 0) {
+        return this._evaluateBoard(board, color, advanced, godMode);
+      }
+
+      let bestVal;
       if (maximizing) {
-        let best = -Infinity;
+        bestVal = -Infinity;
         for (const mv of moves) {
-          const v = alphaBeta(this._simulateMove(board, mv), depth - 1, alpha, beta, false);
-          if (v > best) best = v;
-          if (best > alpha) alpha = best;
+          const mover = board[mv.fr][mv.fc];
+          const captured = board[mv.tr][mv.tc];
+          board[mv.tr][mv.tc] = mover;
+          board[mv.fr][mv.fc] = null;
+
+          const v = alphaBeta(board, depth - 1, alpha, beta, false);
+
+          board[mv.fr][mv.fc] = mover;
+          board[mv.tr][mv.tc] = captured;
+
+          if (timedOut) return bestVal === -Infinity ? this._evaluateBoard(board, color, advanced, godMode) : bestVal;
+          if (v > bestVal) bestVal = v;
+          if (bestVal > alpha) alpha = bestVal;
           if (beta <= alpha) break;
         }
-        return best;
       } else {
-        let best = Infinity;
+        bestVal = Infinity;
         for (const mv of moves) {
-          const v = alphaBeta(this._simulateMove(board, mv), depth - 1, alpha, beta, true);
-          if (v < best) best = v;
-          if (best < beta) beta = best;
+          const mover = board[mv.fr][mv.fc];
+          const captured = board[mv.tr][mv.tc];
+          board[mv.tr][mv.tc] = mover;
+          board[mv.fr][mv.fc] = null;
+
+          const v = alphaBeta(board, depth - 1, alpha, beta, true);
+
+          board[mv.fr][mv.fc] = mover;
+          board[mv.tr][mv.tc] = captured;
+
+          if (timedOut) return bestVal === Infinity ? this._evaluateBoard(board, color, advanced, godMode) : bestVal;
+          if (v < bestVal) bestVal = v;
+          if (bestVal < beta) beta = bestVal;
           if (beta <= alpha) break;
         }
-        return best;
       }
+
+      if (tt.size < 45000) {
+        let flag = 0;
+        if (bestVal <= origAlpha) flag = 2;
+        else if (bestVal >= origBeta) flag = 1;
+        tt.set(hash, { depth, score: bestVal, flag });
+      }
+      return bestVal;
     };
 
-    const currentVal = this._evaluateBoard(this.board, color, advanced);
+    // Order root actions: captures > moves > best flips
     const ordered = [...actions].sort((a, b) => {
-      const va = a.type === 'capture' ? 200 + (this.board[a.tr][a.tc]?.meta.value || 0) : a.type === 'move' ? 50 : 10;
-      const vb = b.type === 'capture' ? 200 + (this.board[b.tr][b.tc]?.meta.value || 0) : b.type === 'move' ? 50 : 10;
+      const va = a.type === 'capture'
+        ? 400 + (workBoard[a.tr][a.tc]?.meta.value || 0) * 3 - (workBoard[a.fr][a.fc]?.meta.value || 0) * 0.2
+        : a.type === 'move' ? 80 : 10;
+      const vb = b.type === 'capture'
+        ? 400 + (workBoard[b.tr][b.tc]?.meta.value || 0) * 3 - (workBoard[b.fr][b.fc]?.meta.value || 0) * 0.2
+        : b.type === 'move' ? 80 : 10;
       return vb - va;
     });
 
+    // Pre-compute flip tactical deltas once (huge speedup)
+    const flipDeltas = new Map();
+    for (const act of ordered) {
+      if (act.type === 'flip') {
+        flipDeltas.set(`${act.r},${act.c}`, this._scoreFlipExpectimax(workBoard, act.r, act.c, color, advanced, godMode));
+      }
+    }
+
     let bestAction = ordered[0];
-    // Iterative deepening from depth 1 up to maxDepth so time budget is always respected cleanly
+
+    // Iterative Deepening from depth 1 up to maxDepth!
     for (let d = 1; d <= maxDepth; d++) {
       let iterBestScore = -Infinity;
       let iterBestAction = ordered[0];
       timedOut = false;
 
+      // CRITICAL FIX: What happens if AI wastes its turn flipping instead of rescuing a hanging piece?
+      // Evaluate the opponent's best immediate punishment on the current board!
+      const flipBaseline = deepFlip
+        ? alphaBeta(workBoard, Math.min(d, 3), -Infinity, Infinity, false)
+        : this._evaluateBoard(workBoard, color, advanced, godMode);
+      if (timedOut) break;
+
       for (const act of ordered) {
         let score;
         if (act.type === 'flip') {
-          score = currentVal + this._scoreFlipExpectimax(this.board, act.r, act.c, color, advanced);
+          score = flipBaseline + (flipDeltas.get(`${act.r},${act.c}`) || 0);
         } else {
-          const nextB = this._simulateMove(this.board, act);
-          score = alphaBeta(nextB, d, -Infinity, Infinity, false);
+          const mover = workBoard[act.fr][act.fc];
+          const captured = workBoard[act.tr][act.tc];
+          workBoard[act.tr][act.tc] = mover;
+          workBoard[act.fr][act.fc] = null;
+
+          score = alphaBeta(workBoard, d - 1, -Infinity, Infinity, false);
+
+          // Anti-repetition logic: avoid shuffling in circles when winning, allow draw defense when losing!
+          if (!captured) {
+            const nextHash = this._boardHashKey(workBoard, enemy);
+            if (recentHashes.has(nextHash)) {
+              score += score > 20 ? -38 : (score < -40 ? 18 : -12);
+            }
+          }
+
+          workBoard[act.fr][act.fc] = mover;
+          workBoard[act.tr][act.tc] = captured;
         }
 
         if (timedOut) break;
@@ -711,6 +912,12 @@ export class BanqiGame {
 
       if (!timedOut) {
         bestAction = iterBestAction;
+        // Put best action first for next deeper iteration -> massive Alpha-Beta speedup!
+        const idx = ordered.indexOf(bestAction);
+        if (idx > 0) {
+          ordered.splice(idx, 1);
+          ordered.unshift(bestAction);
+        }
       } else {
         break;
       }

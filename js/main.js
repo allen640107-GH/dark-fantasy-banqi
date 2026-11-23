@@ -186,7 +186,8 @@ function startNewGame() {
     medium: '普通',
     hard: '困難',
     master: '宗師',
-    abyss: '地獄'
+    abyss: '地獄',
+    god: '神域'
   };
   hudModeBadge.textContent = config.mode === 'pve'
     ? `單人・${diffLabels[config.difficulty]}`
