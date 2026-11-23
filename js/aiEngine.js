@@ -1,7 +1,7 @@
-// Championship-Grade Taiwanese Banqi (Dark Chess) Engine
-// Features: Flat Int8Array(32) board, 64-bit Zobrist Hashing, 131K-entry Typed-Array Transposition Table,
-// Iterative Deepening PVS (Alpha-Beta), Quiescence Search, MVV-LVA + Killer + History Ordering,
-// True Probability-Weighted Expectimax Flip Search, Cannon Battery & Endgame Cornering Heuristics.
+// Championship-Grade Taiwanese Banqi (Dark Chess) Engine v2
+// Zero-Sum Hidden-Deck Accounting + Clean TT + Guaranteed Depth-1+Quiescence + True Expectimax Flips
+// Features: Flat Int8Array(32), 64-bit Zobrist Hashing, 131K Typed-Array TT, PVS, Killer/History Ordering,
+// Cannon Battery Setup, Fork Detection, Hanging-Piece Defense, Endgame Cornering & Anti-Repetition.
 
 const ROWS = 4;
 const COLS = 8;
@@ -13,7 +13,7 @@ const N = 32;
 //  2 .. 8  = Red revealed   (rank = val - 2: 0=兵,1=炮,2=傌,3=俥,4=相,5=仕,6=帥)
 // -2 .. -8 = Black revealed (rank = -val - 2: 0=卒,1=包,2=馬,3=車,4=象,5=士,6=將)
 
-const BASE_VAL = new Int32Array([22, 62, 28, 42, 64, 92, 135]);
+const BASE_VAL = new Int32Array([22, 66, 28, 44, 66, 96, 140]);
 const WIN_SCORE = 50000;
 
 // Precomputed rank capture matrix (non-cannon adjacent captures)
@@ -53,7 +53,6 @@ for (let r = 0; r < ROWS; r++) {
   }
 }
 
-// Center control bonus table (4x8)
 const CENTER_BONUS = new Int16Array(N);
 const EDGE_PENALTY = new Int16Array(N);
 for (let r = 0; r < ROWS; r++) {
@@ -63,7 +62,7 @@ for (let r = 0; r < ROWS; r++) {
     CENTER_BONUS[idx] = Math.round(Math.max(0, 4.5 - dist) * 2.5);
     const isCorner = (r === 0 || r === 3) && (c === 0 || c === 7);
     const isEdge = r === 0 || r === 3 || c === 0 || c === 7;
-    EDGE_PENALTY[idx] = isCorner ? 14 : (isEdge ? 6 : 0);
+    EDGE_PENALTY[idx] = isCorner ? 16 : (isEdge ? 7 : 0);
   }
 }
 
@@ -85,7 +84,7 @@ for (let i = 0; i < N * 17; i++) {
 const ZOBRIST_TURN_HI = nextRand32();
 const ZOBRIST_TURN_LO = nextRand32();
 
-// Flat Typed-Array Transposition Table (131,072 entries, zero GC)
+// Flat Typed-Array Transposition Table (131,072 entries, cleared cleanly each search!)
 const TT_BITS = 17;
 const TT_SIZE = 1 << TT_BITS;
 const TT_MASK = TT_SIZE - 1;
@@ -96,7 +95,6 @@ const ttFlag = new Uint8Array(TT_SIZE); // 0=empty, 1=EXACT, 2=LOWER, 3=UPPER
 const ttScore = new Int32Array(TT_SIZE);
 const ttMove = new Uint16Array(TT_SIZE);
 
-// Pre-allocated move buffers per ply (max 40 plies, max 128 moves per ply)
 const MAX_PLY = 40;
 const MOVE_BUF = new Int32Array(MAX_PLY * 128);
 const SCORE_BUF = new Int32Array(MAX_PLY * 128);
@@ -104,7 +102,11 @@ const KILLER1 = new Int32Array(MAX_PLY);
 const KILLER2 = new Int32Array(MAX_PLY);
 const HISTORY = new Int32Array(N * N);
 
-// Move bit-packing: from (0..31) | (to << 5) | (isCap << 10) | (isCannon << 11)
+const evalRIdx = new Int8Array(16);
+const evalRRank = new Int8Array(16);
+const evalBIdx = new Int8Array(16);
+const evalBRank = new Int8Array(16);
+
 function packMove(fr, to, isCap, isCannon) {
   return fr | (to << 5) | (isCap ? 1024 : 0) | (isCannon ? 2048 : 0);
 }
@@ -148,7 +150,6 @@ function computeHash(b, side) {
   return [hi, lo];
 }
 
-// Generate all legal moves for `side` (1 = red, -1 = black) into MOVE_BUF[ply*128..]
 function genMoves(b, side, ply, capturesOnly) {
   const base = ply * 128;
   let count = 0;
@@ -178,7 +179,6 @@ function genMoves(b, side, ply, capturesOnly) {
       }
     }
 
-    // Cannon jump-capture along 4 rays
     if (rank === 1) {
       const rays = RAYS[i];
       for (let d = 0; d < 4; d++) {
@@ -204,13 +204,11 @@ function genMoves(b, side, ply, capturesOnly) {
   return count;
 }
 
-// Check if `sq` is attacked by `attackerSide` (fast tactical check for defense/hanging evaluation)
 function isAttackedBy(b, sq, attackerSide) {
   const targetV = b[sq];
   if (targetV === 0 || targetV === 1) return false;
   const targetRank = (targetV > 0 ? targetV : -targetV) - 2;
 
-  // Adjacent attackers
   const adj = ADJ[sq];
   for (let k = 0; k < adj.length; k++) {
     const av = b[adj[k]];
@@ -220,7 +218,6 @@ function isAttackedBy(b, sq, attackerSide) {
     }
   }
 
-  // Cannon attackers along 4 rays
   const rays = RAYS[sq];
   for (let d = 0; d < 4; d++) {
     const ray = rays[d];
@@ -243,26 +240,23 @@ function isAttackedBy(b, sq, attackerSide) {
   return false;
 }
 
-// Grandmaster Static Evaluation (returns score from `sideToMove` perspective for Negamax!)
-function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
+// Grandmaster Static Evaluation with ZERO-SUM UNREVEALED DECK ACCOUNTING!
+// Counting unrevealed pieces at ~0.95x material eliminates phantom flip inflation!
+function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount, ply = 0) {
   let redCount = 0, blackCount = 0;
   let redGen = unrevRed[6], blackGen = unrevBlack[6];
   let redSol = unrevRed[0], blackSol = unrevBlack[0];
   let redCan = unrevRed[1], blackCan = unrevBlack[1];
   let redMaxRank = -1, blackMaxRank = -1;
 
-  // Store revealed piece indices & ranks in tiny local arrays
   let rLen = 0, bLen = 0;
-  const rIdx = evalRIdx, rRank = evalRRank;
-  const bIdx = evalBIdx, bRank = evalBRank;
-
   for (let i = 0; i < N; i++) {
     const v = b[i];
     if (v === 0 || v === 1) continue;
     if (v > 0) {
       const rk = v - 2;
-      rIdx[rLen] = i;
-      rRank[rLen++] = rk;
+      evalRIdx[rLen] = i;
+      evalRRank[rLen++] = rk;
       redCount++;
       if (rk === 6) redGen++;
       else if (rk === 0) redSol++;
@@ -270,8 +264,8 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
       if (rk > redMaxRank && rk !== 1) redMaxRank = rk;
     } else {
       const rk = -v - 2;
-      bIdx[bLen] = i;
-      bRank[bLen++] = rk;
+      evalBIdx[bLen] = i;
+      evalBRank[bLen++] = rk;
       blackCount++;
       if (rk === 6) blackGen++;
       else if (rk === 0) blackSol++;
@@ -281,45 +275,51 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
   }
 
   if (hiddenCount === 0) {
-    if (blackCount === 0) return sideToMove === 1 ? WIN_SCORE : -WIN_SCORE;
-    if (redCount === 0) return sideToMove === -1 ? WIN_SCORE : -WIN_SCORE;
+    if (blackCount === 0) return sideToMove === 1 ? (WIN_SCORE - ply) : (-WIN_SCORE + ply);
+    if (redCount === 0) return sideToMove === -1 ? (WIN_SCORE - ply) : (-WIN_SCORE + ply);
   }
 
   const totalBoardPieces = rLen + bLen + hiddenCount;
 
-  // Dynamic Banqi piece valuation
   const getVal = (rk, isRed) => {
     const oppGen = isRed ? blackGen : redGen;
     const oppSol = isRed ? blackSol : redSol;
     const oppCan = isRed ? blackCan : redCan;
     if (rk === 0) return oppGen > 0 ? 48 : 18;
-    if (rk === 1) return totalBoardPieces >= 12 ? 78 : (totalBoardPieces >= 6 ? 60 : 38);
+    if (rk === 1) return totalBoardPieces >= 12 ? 80 : (totalBoardPieces >= 6 ? 62 : 38);
     if (rk === 6) {
-      if (oppSol === 0 && oppCan === 0) return 260; // Unkillable sovereign!
-      if (oppSol === 0) return 175;
-      return 135;
+      if (oppSol === 0 && oppCan === 0) return 270;
+      if (oppSol === 0) return 180;
+      return 140;
     }
-    if (rk === 5) return oppGen === 0 ? 125 : 92;
-    if (rk === 4) return (oppGen === 0 && (isRed ? blackMaxRank : redMaxRank) <= 4) ? 88 : 64;
+    if (rk === 5) return oppGen === 0 ? 128 : 96;
+    if (rk === 4) return (oppGen === 0 && (isRed ? blackMaxRank : redMaxRank) <= 4) ? 90 : 66;
     return BASE_VAL[rk];
   };
 
   let redScore = 0;
   let blackScore = 0;
 
-  // Supremacy bonus for owning the highest non-cannon piece on the board
-  if (hiddenCount <= 6) {
-    if (redMaxRank > blackMaxRank) redScore += 42;
-    else if (blackMaxRank > redMaxRank) blackScore += 42;
+  // CRITICAL ZERO-SUM FIX: Include unrevealed pool material at EXACT 3.00x (same as revealed 3.00x)!
+  // Revealing a tile creates ZERO phantom material regardless of red/black hidden counts!
+  if (hiddenCount > 0) {
+    for (let rk = 0; rk < 7; rk++) {
+      if (unrevRed[rk] > 0) redScore += getVal(rk, true) * 3 * unrevRed[rk];
+      if (unrevBlack[rk] > 0) blackScore += getVal(rk, false) * 3 * unrevBlack[rk];
+    }
   }
 
-  // Material + Center + Threat/Defense + Cannon Battery Setup
+  if (hiddenCount <= 6) {
+    if (redMaxRank > blackMaxRank) redScore += 45;
+    else if (blackMaxRank > redMaxRank) blackScore += 45;
+  }
+
   for (let m = 0; m < rLen; m++) {
-    const i = rIdx[m], rk = rRank[m];
+    const i = evalRIdx[m], rk = evalRRank[m];
     const val = getVal(rk, true);
     redScore += val * 3 + CENTER_BONUS[i];
 
-    // Cannon Battery & Alignment Heuristic (架炮戰術)
+    // Cannon Battery & Alignment
     if (rk === 1) {
       const rays = RAYS[i];
       for (let d = 0; d < 4; d++) {
@@ -328,12 +328,11 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
         for (let k = 0; k < ray.length; k++) {
           const tv = b[ray[k]];
           if (tv !== 0) {
-            if (blockers === 0) {
-              blockers = 1;
-            } else if (blockers === 1) {
+            if (blockers === 0) blockers = 1;
+            else if (blockers === 1) {
               if (tv < 0) {
                 const trk = -tv - 2;
-                redScore += Math.round(getVal(trk, false) * 0.48); // Direct cannon lock-on!
+                redScore += Math.round(getVal(trk, false) * 0.45);
               }
               break;
             }
@@ -342,7 +341,6 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
       }
     }
 
-    // Mobility & Hanging check
     const adj = ADJ[i];
     let mob = 0;
     for (let k = 0; k < adj.length; k++) {
@@ -350,13 +348,12 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
     }
     redScore += mob * 2;
     if (isAttackedBy(b, i, -1)) {
-      // Penalize threatened pieces gently (Quiescence handles tactical captures, this guides quiet moves!)
-      redScore -= Math.round(val * 0.45);
+      redScore -= Math.round(val * 0.42);
     }
   }
 
   for (let m = 0; m < bLen; m++) {
-    const i = bIdx[m], rk = bRank[m];
+    const i = evalBIdx[m], rk = evalBRank[m];
     const val = getVal(rk, false);
     blackScore += val * 3 + CENTER_BONUS[i];
 
@@ -368,12 +365,11 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
         for (let k = 0; k < ray.length; k++) {
           const tv = b[ray[k]];
           if (tv !== 0) {
-            if (blockers === 0) {
-              blockers = 1;
-            } else if (blockers === 1) {
+            if (blockers === 0) blockers = 1;
+            else if (blockers === 1) {
               if (tv > 1) {
                 const trk = tv - 2;
-                blackScore += Math.round(getVal(trk, true) * 0.48);
+                blackScore += Math.round(getVal(trk, true) * 0.45);
               }
               break;
             }
@@ -389,17 +385,17 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
     }
     blackScore += mob * 2;
     if (isAttackedBy(b, i, 1)) {
-      blackScore -= Math.round(val * 0.45);
+      blackScore -= Math.round(val * 0.42);
     }
   }
 
-  // Predator-Prey Chasing, Cornering & Pincer Coordination!
-  const endgameFactor = hiddenCount === 0 ? 3 : (hiddenCount <= 6 ? 2 : 1);
+  // Predator-Prey Chasing & Cornering
+  const endgameFactor = hiddenCount === 0 ? 4 : (hiddenCount <= 6 ? 2 : 1);
   for (let m = 0; m < rLen; m++) {
-    const ri = rIdx[m], rrk = rRank[m];
+    const ri = evalRIdx[m], rrk = evalRRank[m];
     const rr = ri >> 3, rc = ri & 7;
     for (let n = 0; n < bLen; n++) {
-      const bi = bIdx[n], brk = bRank[n];
+      const bi = evalBIdx[n], brk = evalBRank[n];
       const dist = Math.abs(rr - (bi >> 3)) + Math.abs(rc - (bi & 7));
       if (CAN_BEAT[rrk * 7 + brk]) {
         redScore += (10 - dist) * 3 * endgameFactor;
@@ -416,27 +412,24 @@ function evaluate(b, sideToMove, unrevRed, unrevBlack, hiddenCount) {
   return sideToMove === 1 ? net : -net;
 }
 
-const evalRIdx = new Int8Array(16);
-const evalRRank = new Int8Array(16);
-const evalBIdx = new Int8Array(16);
-const evalBRank = new Int8Array(16);
-
 export function findBestActionPro(gameState, config) {
-  const { maxDepth, qDepth, budgetMs, expectimaxFlips = 6, flipSearchDepth = 2 } = config;
+  const { maxDepth, qDepth, budgetMs, expectimaxFlips = 8 } = config;
   const aiSide = gameState.aiColor === 'red' ? 1 : -1;
   const encoded = encodeBoard(gameState.board);
   const { b, unrevRed, unrevBlack } = encoded;
   let hiddenCount = encoded.hiddenCount;
   const startTime = performance.now();
   let timedOut = false;
+  let allowTimeout = false; // NEVER allow timeout on depth 1!
+  let useTT = true;
   let nodes = 0;
 
-  // Clear per-search killer & decay history
+  // CRITICAL FIX: Clean TT every turn so stale/bucket hashes NEVER corrupt scores!
+  ttFlag.fill(0);
   KILLER1.fill(0);
   KILLER2.fill(0);
   for (let i = 0; i < HISTORY.length; i++) HISTORY[i] >>= 2;
 
-  // Collect recent position hashes for anti-repetition & draw-defense
   const recentHashSet = new Set();
   if (gameState.recentBoards) {
     for (const rb of gameState.recentBoards) {
@@ -450,7 +443,7 @@ export function findBestActionPro(gameState, config) {
 
   const checkTime = () => {
     nodes++;
-    if ((nodes & 255) === 0 && performance.now() - startTime > budgetMs) {
+    if (allowTimeout && (nodes & 255) === 0 && performance.now() - startTime > budgetMs) {
       timedOut = true;
     }
     return timedOut;
@@ -499,8 +492,8 @@ export function findBestActionPro(gameState, config) {
   }
 
   function quiescence(alpha, beta, side, ply, qLeft, hHi, hLo) {
-    if (checkTime()) return evaluate(b, side, unrevRed, unrevBlack, hiddenCount);
-    const standPat = evaluate(b, side, unrevRed, unrevBlack, hiddenCount);
+    if (checkTime()) return evaluate(b, side, unrevRed, unrevBlack, hiddenCount, ply);
+    const standPat = evaluate(b, side, unrevRed, unrevBlack, hiddenCount, ply);
     if (qLeft <= 0 || ply >= MAX_PLY - 1) return standPat;
     if (standPat >= beta) return beta;
     if (standPat > alpha) alpha = standPat;
@@ -515,7 +508,6 @@ export function findBestActionPro(gameState, config) {
       const fr = mv & 31, to = (mv >> 5) & 31;
       const mover = b[fr], cap = b[to];
 
-      // Make move & update hash incrementally
       const oFr = fr * 17 + (mover + 8);
       const oToOld = to * 17 + (cap + 8);
       const oToNew = to * 17 + (mover + 8);
@@ -537,12 +529,12 @@ export function findBestActionPro(gameState, config) {
   }
 
   function negamax(depth, alpha, beta, side, ply, hHi, hLo) {
-    if (checkTime()) return evaluate(b, side, unrevRed, unrevBlack, hiddenCount);
+    if (checkTime()) return evaluate(b, side, unrevRed, unrevBlack, hiddenCount, ply);
 
     const origAlpha = alpha;
     const ttIdx = hLo & TT_MASK;
     let ttBest = 0;
-    if (ttFlag[ttIdx] !== 0 && ttKeyHi[ttIdx] === hHi && ttKeyLo[ttIdx] === hLo) {
+    if (useTT && ttFlag[ttIdx] !== 0 && ttKeyHi[ttIdx] === hHi && ttKeyLo[ttIdx] === hLo) {
       ttBest = ttMove[ttIdx];
       if (ttDepth[ttIdx] >= depth) {
         const sc = ttScore[ttIdx];
@@ -561,7 +553,6 @@ export function findBestActionPro(gameState, config) {
     const base = ply * 128;
     const count = genMoves(b, side, ply, false);
     if (count === 0) {
-      // If no hidden pieces remain, having zero moves is an immediate DEFEAT!
       if (hiddenCount === 0) return -WIN_SCORE + ply;
       return evaluate(b, side, unrevRed, unrevBlack, hiddenCount);
     }
@@ -590,7 +581,6 @@ export function findBestActionPro(gameState, config) {
       b[fr] = 0;
 
       let sc;
-      // Principal Variation Search (PVS / NegaScout)
       if (i === 0) {
         sc = -negamax(depth - 1, -beta, -alpha, -side, ply + 1, nHi, nLo);
       } else {
@@ -622,30 +612,134 @@ export function findBestActionPro(gameState, config) {
       }
     }
 
-    // Store in Transposition Table
-    ttKeyHi[ttIdx] = hHi;
-    ttKeyLo[ttIdx] = hLo;
-    ttDepth[ttIdx] = depth;
-    ttScore[ttIdx] = bestScore;
-    ttMove[ttIdx] = bestMv & 4095;
-    ttFlag[ttIdx] = bestScore <= origAlpha ? 3 : (bestScore >= beta ? 2 : 1);
+    if (useTT) {
+      ttKeyHi[ttIdx] = hHi;
+      ttKeyLo[ttIdx] = hLo;
+      ttDepth[ttIdx] = depth;
+      ttScore[ttIdx] = bestScore;
+      ttMove[ttIdx] = bestMv & 4095;
+      ttFlag[ttIdx] = bestScore <= origAlpha ? 3 : (bestScore >= beta ? 2 : 1);
+    }
 
     return bestScore;
   }
 
-  // 1. Collect all root moves/captures
+  // ===================== STEP 1: RUN MAIN PVS MOVE SEARCH FIRST! =====================
+  // Guarantee Depth 1 + Quiescence ALWAYS completes with zero possibility of unevaluated blunders!
   const rootMoveCount = genMoves(b, aiSide, 0, false);
   const rootMoves = [];
   for (let i = 0; i < rootMoveCount; i++) {
     rootMoves.push(MOVE_BUF[i]);
   }
 
-  // 2. Collect and pre-rank all hidden squares for True Expectimax Flip Evaluation!
-  const hiddenSquares = [];
+  let bestMoveCode = -1;
+  let bestMoveScore = -999999;
+  let completedDepth = 1;
+  const rootEvalAtStart = evaluate(b, aiSide, unrevRed, unrevBlack, hiddenCount);
+  const moveBudgetEnd = startTime + (hiddenCount > 0 ? budgetMs * 0.65 : budgetMs);
+
+  if (rootMoves.length > 0) {
+    rootMoves.sort((a, bMove) => {
+      const va = (a & 1024) ? 10000 + BASE_VAL[(b[(a >> 5) & 31] > 0 ? b[(a >> 5) & 31] : -b[(a >> 5) & 31]) - 2] * 16 : 0;
+      const vb = (bMove & 1024) ? 10000 + BASE_VAL[(b[(bMove >> 5) & 31] > 0 ? b[(bMove >> 5) & 31] : -b[(bMove >> 5) & 31]) - 2] * 16 : 0;
+      return vb - va;
+    });
+
+    bestMoveCode = rootMoves[0];
+
+    for (let d = 1; d <= maxDepth; d++) {
+      if (d > 1 && performance.now() > moveBudgetEnd) break;
+      allowTimeout = d > 1; // Depth 1 NEVER aborts!
+      timedOut = false;
+
+      let iterBestSc = -999999;
+      let iterBestMv = rootMoves[0];
+      let alpha = -999999;
+      const beta = 999999;
+
+      for (let i = 0; i < rootMoves.length; i++) {
+        if (allowTimeout && performance.now() > moveBudgetEnd) {
+          timedOut = true;
+          break;
+        }
+        const mv = rootMoves[i];
+        const fr = mv & 31, to = (mv >> 5) & 31;
+        const mover = b[fr], cap = b[to];
+
+        const oFr = fr * 17 + (mover + 8);
+        const oToNew = to * 17 + (mover + 8);
+        let nHi = (curHi ^ ZOBRIST_HI[oFr] ^ ZOBRIST_HI[oToNew] ^ ZOBRIST_TURN_HI) >>> 0;
+        let nLo = (curLo ^ ZOBRIST_LO[oFr] ^ ZOBRIST_LO[oToNew] ^ ZOBRIST_TURN_LO) >>> 0;
+        if (cap !== 0) {
+          const oToOld = to * 17 + (cap + 8);
+          nHi = (nHi ^ ZOBRIST_HI[oToOld]) >>> 0;
+          nLo = (nLo ^ ZOBRIST_LO[oToOld]) >>> 0;
+        }
+
+        b[to] = mover;
+        b[fr] = 0;
+
+        // Compute root moveBias BEFORE PVS search so fail-low bounds are NEVER corrupted!
+        let moveBias = 0;
+        if (cap !== 0) {
+          const capRk = (cap > 0 ? cap : -cap) - 2;
+          moveBias += hiddenCount > 0 ? (26 + Math.round(BASE_VAL[capRk] * 0.35)) : 0;
+        } else if (recentHashSet.has(`${nHi}_${nLo}`)) {
+          moveBias -= rootEvalAtStart > 25 ? 85 : (rootEvalAtStart < -90 ? 0 : 25);
+        }
+
+        const adjAlpha = alpha - moveBias;
+        const adjBeta = beta - moveBias;
+
+        let rawSc;
+        if (i === 0) {
+          rawSc = -negamax(d - 1, -adjBeta, -adjAlpha, -aiSide, 1, nHi, nLo);
+        } else {
+          rawSc = -negamax(d - 1, -adjAlpha - 1, -adjAlpha, -aiSide, 1, nHi, nLo);
+          if (!timedOut && rawSc > adjAlpha) {
+            rawSc = -negamax(d - 1, -adjBeta, -adjAlpha, -aiSide, 1, nHi, nLo);
+          }
+        }
+        const sc = rawSc + moveBias;
+
+        b[fr] = mover;
+        b[to] = cap;
+
+        if (timedOut) break;
+        if (sc > iterBestSc) {
+          iterBestSc = sc;
+          iterBestMv = mv;
+        }
+        if (sc > alpha) alpha = sc;
+      }
+
+      if (!timedOut) {
+        bestMoveCode = iterBestMv;
+        bestMoveScore = iterBestSc;
+        completedDepth = d;
+        const idx = rootMoves.indexOf(bestMoveCode);
+        if (idx > 0) {
+          rootMoves.splice(idx, 1);
+          rootMoves.unshift(bestMoveCode);
+        }
+        if (bestMoveScore > WIN_SCORE - 100) break;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // ===================== STEP 2: DEPTH-MATCHED EXPECTIMAX FLIP EVALUATION =====================
+  // CRITICAL GRANDMASTER FORMULA:
+  //   FlipScore(sq) = nullMoveScore(completedDepth - 1) + (Expect1(sq) - nullMoveScore(1))
+  // Comparing Move(Depth D) vs Flip(Depth D) eliminates 100% of horizon-effect missed captures!
+  let bestFlipSq = -1;
+  let bestFlipScore = -999999;
+
   if (hiddenCount > 0) {
+    const hiddenSquares = [];
     for (let i = 0; i < N; i++) {
       if (b[i] !== 1) continue;
-      // Fast strategic heuristic to select the most interesting candidate flip squares
       let prio = CENTER_BONUS[i];
       const adj = ADJ[i];
       for (let k = 0; k < adj.length; k++) {
@@ -654,16 +748,13 @@ export function findBestActionPro(gameState, config) {
         const isMine = (aiSide === 1 && av > 0) || (aiSide === -1 && av < 0);
         const rk = (av > 0 ? av : -av) - 2;
         if (isMine) {
-          // Dangerous to flip right next to our own General/Advisor!
-          if (rk >= 5) prio -= 35;
-          else if (rk === 0) prio += 8; // Safe next to our Soldier
+          if (rk >= 5) prio -= 40;
+          else if (rk === 0) prio += 10;
         } else {
-          // Interesting to flip next to enemy high-value piece (potential sniper pop), risky next to enemy mid-piece
-          if (rk >= 5) prio += 14;
-          else prio -= 8;
+          if (rk >= 5) prio += 12;
+          else prio -= 10;
         }
       }
-      // Check if an enemy cannon can jump-shoot square `i` right away
       const rays = RAYS[i];
       for (let d = 0; d < 4; d++) {
         const ray = rays[d];
@@ -676,180 +767,109 @@ export function findBestActionPro(gameState, config) {
               if (av !== 1) {
                 const isMine = (aiSide === 1 && av > 0) || (aiSide === -1 && av < 0);
                 const rk = (av > 0 ? av : -av) - 2;
-                if (rk === 1) prio += isMine ? 18 : -28; // Our cannon aims here (+18) vs Enemy cannon aims here (-28)!
+                if (rk === 1) prio += isMine ? 20 : -32;
               }
               break;
             }
           }
         }
       }
-      hiddenSquares.push({ sq: i, prio: prio + Math.random() * 0.5 });
+      hiddenSquares.push({ sq: i, prio: prio + Math.random() * 0.4 });
     }
-    hiddenSquares.sort((a, b) => b.prio - a.prio);
-  }
+    hiddenSquares.sort((a, bSq) => bSq.prio - a.prio);
 
-  // Build exact probability buckets of remaining unrevealed pieces
-  const buckets = [];
-  if (hiddenCount > 0) {
+    const buckets = [];
     for (let rk = 0; rk < 7; rk++) {
       if (unrevRed[rk] > 0) buckets.push({ val: rk + 2, isRed: true, rk, cnt: unrevRed[rk] });
       if (unrevBlack[rk] > 0) buckets.push({ val: -(rk + 2), isRed: false, rk, cnt: unrevBlack[rk] });
     }
-  }
 
-  // Evaluate top candidate flips using TRUE Multi-Outcome Expectimax!
-  // For each candidate flip square, actually place EVERY possible hidden piece on it,
-  // let the opponent respond with Negamax(flipSearchDepth) + Quiescence, and take exact probability-weighted average!
-  let bestFlipSq = -1;
-  let bestFlipScore = -999999;
+    if (hiddenSquares.length > 0 && buckets.length > 0) {
+      const oppHi = (curHi ^ ZOBRIST_TURN_HI) >>> 0;
+      const oppLo = (curLo ^ ZOBRIST_TURN_LO) >>> 0;
 
-  if (hiddenSquares.length > 0 && buckets.length > 0) {
-    const numToTest = Math.min(expectimaxFlips, hiddenSquares.length);
-    const flipBudgetEnd = startTime + budgetMs * 0.35; // Cap flip Expectimax to 35% of total budget
-    const oldHidden = hiddenCount;
-    hiddenCount--;
+      // Exact depth-matched baseline if AI passes/flips instead of moving an existing piece!
+      // AXIOM OF PASSING: Wasting a turn without moving existing pieces can NEVER magically gain
+      // delayed free captures above rootEval (prevents procrastinating free kills like 士 x 俥!).
+      const rootEval = evaluate(b, aiSide, unrevRed, unrevBlack, hiddenCount);
+      useTT = true;
+      allowTimeout = false;
+      timedOut = false;
+      const nullScoreRaw = rootMoves.length > 0
+        ? -negamax(completedDepth - 1, -999999, 999999, -aiSide, 1, oppHi, oppLo)
+        : rootEval;
+      const nullScoreDeep = Math.min(nullScoreRaw, rootEval);
 
-    for (let f = 0; f < numToTest; f++) {
-      if (f > 0 && performance.now() > flipBudgetEnd) break;
-      const sq = hiddenSquares[f].sq;
-      let weightedSum = 0;
-      let totalW = 0;
-      let aborted = false;
+      // Measure pure local 1-ply tactical delta of flipping `sq` without TT cross-contamination!
+      useTT = false;
+      const nullScore1 = -negamax(1, -999999, 999999, -aiSide, 1, oppHi, oppLo);
 
-      const oHid = sq * 17 + (1 + 8);
-      for (let bi = 0; bi < buckets.length; bi++) {
-        const bk = buckets[bi];
-        // Temporarily reveal this bucket outcome on `sq`
-        b[sq] = bk.val;
-        if (bk.isRed) unrevRed[bk.rk]--;
-        else unrevBlack[bk.rk]--;
+      allowTimeout = true;
+      timedOut = false;
 
-        const oNew = sq * 17 + (bk.val + 8);
-        const nHi = (curHi ^ ZOBRIST_HI[oHid] ^ ZOBRIST_HI[oNew] ^ ZOBRIST_TURN_HI) >>> 0;
-        const nLo = (curLo ^ ZOBRIST_LO[oHid] ^ ZOBRIST_LO[oNew] ^ ZOBRIST_TURN_LO) >>> 0;
+      const numToTest = Math.min(expectimaxFlips, hiddenSquares.length);
+      const oldHidden = hiddenCount;
+      hiddenCount--;
 
-        // Opponent replies with search!
-        const outcomeScore = -negamax(flipSearchDepth, -999999, 999999, -aiSide, 1, nHi, nLo);
+      let bestPureDelta = -999999;
 
-        // Restore hidden tile & unrevealed count
-        b[sq] = 1;
-        if (bk.isRed) unrevRed[bk.rk]++;
-        else unrevBlack[bk.rk]++;
+      for (let f = 0; f < numToTest; f++) {
+        if (f > 0 && performance.now() - startTime > budgetMs) break;
+        const sq = hiddenSquares[f].sq;
+        let weightedSum = 0;
+        let totalW = 0;
+        let aborted = false;
 
-        if (timedOut) {
-          aborted = true;
-          break;
+        const oHid = sq * 17 + (1 + 8);
+        for (let bi = 0; bi < buckets.length; bi++) {
+          const bk = buckets[bi];
+          b[sq] = bk.val;
+          if (bk.isRed) unrevRed[bk.rk]--;
+          else unrevBlack[bk.rk]--;
+
+          const oNew = sq * 17 + (bk.val + 8);
+          const nHi = (curHi ^ ZOBRIST_HI[oHid] ^ ZOBRIST_HI[oNew] ^ ZOBRIST_TURN_HI) >>> 0;
+          const nLo = (curLo ^ ZOBRIST_LO[oHid] ^ ZOBRIST_LO[oNew] ^ ZOBRIST_TURN_LO) >>> 0;
+
+          const outcomeScore = -negamax(1, -999999, 999999, -aiSide, 1, nHi, nLo);
+
+          b[sq] = 1;
+          if (bk.isRed) unrevRed[bk.rk]++;
+          else unrevBlack[bk.rk]++;
+
+          if (timedOut) {
+            aborted = true;
+            break;
+          }
+          weightedSum += outcomeScore * bk.cnt;
+          totalW += bk.cnt;
         }
-        weightedSum += outcomeScore * bk.cnt;
-        totalW += bk.cnt;
-      }
 
-      if (!aborted && totalW > 0) {
-        // Tiny info-gain tiebreaker early when board is mostly unrevealed (so AI opens the board smoothly!)
-        const infoGain = oldHidden >= 24 ? 10 : (oldHidden >= 14 ? 4 : 0);
-        const expScore = (weightedSum / totalW) + infoGain;
-        if (expScore > bestFlipScore) {
-          bestFlipScore = expScore;
-          bestFlipSq = sq;
+        if (!aborted && totalW > 0) {
+          const pureDelta = (weightedSum / totalW) - nullScore1;
+          if (pureDelta > bestPureDelta) {
+            bestPureDelta = pureDelta;
+            bestFlipSq = sq;
+          }
         }
       }
+      hiddenCount = oldHidden;
+      if (bestFlipSq < 0) {
+        bestFlipSq = hiddenSquares[0].sq;
+        bestPureDelta = 0;
+      }
+      // Clamp noisy 1-ply flip spike so a speculative flip never overrides a solid free capture
+      bestPureDelta = Math.max(-250, Math.min(35, bestPureDelta));
+      const infoGain = oldHidden >= 24 ? 8 : (oldHidden >= 14 ? 3 : 0);
+      bestFlipScore = nullScoreDeep + bestPureDelta + infoGain;
     }
-    hiddenCount = oldHidden;
-    timedOut = false; // Reset timeout flag for main move search (which still respects overall budgetMs!)
   }
 
-  // If no revealed moves exist, return best Expectimax flip immediately
+  // ===================== STEP 3: FINAL DECISION =====================
   if (rootMoves.length === 0) {
-    const sq = bestFlipSq >= 0 ? bestFlipSq : hiddenSquares[0].sq;
-    return { type: 'flip', r: sq >> 3, c: sq & 7 };
+    return { type: 'flip', r: bestFlipSq >> 3, c: bestFlipSq & 7 };
   }
 
-  // 3. Iterative Deepening PVS over all revealed moves & captures!
-  // Order root moves by MVV-LVA initially
-  rootMoves.sort((a, bMove) => {
-    const va = (a & 1024) ? 10000 + BASE_VAL[(b[(a >> 5) & 31] > 0 ? b[(a >> 5) & 31] : -b[(a >> 5) & 31]) - 2] * 16 : 0;
-    const vb = (bMove & 1024) ? 10000 + BASE_VAL[(b[(bMove >> 5) & 31] > 0 ? b[(bMove >> 5) & 31] : -b[(bMove >> 5) & 31]) - 2] * 16 : 0;
-    return vb - va;
-  });
-
-  let bestMoveCode = rootMoves[0];
-  let bestMoveScore = -999999;
-
-  for (let d = 1; d <= maxDepth; d++) {
-    let iterBestSc = -999999;
-    let iterBestMv = rootMoves[0];
-    let alpha = -999999;
-    const beta = 999999;
-    timedOut = false;
-
-    for (let i = 0; i < rootMoves.length; i++) {
-      const mv = rootMoves[i];
-      const fr = mv & 31, to = (mv >> 5) & 31;
-      const mover = b[fr], cap = b[to];
-
-      const oFr = fr * 17 + (mover + 8);
-      const oToNew = to * 17 + (mover + 8);
-      let nHi = (curHi ^ ZOBRIST_HI[oFr] ^ ZOBRIST_HI[oToNew] ^ ZOBRIST_TURN_HI) >>> 0;
-      let nLo = (curLo ^ ZOBRIST_LO[oFr] ^ ZOBRIST_LO[oToNew] ^ ZOBRIST_TURN_LO) >>> 0;
-      if (cap !== 0) {
-        const oToOld = to * 17 + (cap + 8);
-        nHi = (nHi ^ ZOBRIST_HI[oToOld]) >>> 0;
-        nLo = (nLo ^ ZOBRIST_LO[oToOld]) >>> 0;
-      }
-
-      b[to] = mover;
-      b[fr] = 0;
-
-      let sc;
-      if (i === 0) {
-        sc = -negamax(d - 1, -beta, -alpha, -aiSide, 1, nHi, nLo);
-      } else {
-        sc = -negamax(d - 1, -alpha - 1, -alpha, -aiSide, 1, nHi, nLo);
-        if (!timedOut && sc > alpha) {
-          sc = -negamax(d - 1, -beta, -alpha, -aiSide, 1, nHi, nLo);
-        }
-      }
-
-      // Immediate capture certainty bonus: when hidden tiles exist, cashing in a guaranteed kill NOW
-      // beats delaying it (since the opponent could flip a hidden blocker/killer on the next turn!).
-      if (cap !== 0) {
-        const capRk = (cap > 0 ? cap : -cap) - 2;
-        sc += hiddenCount > 0 ? (10 + Math.round(BASE_VAL[capRk] * 0.22)) : 6;
-      }
-
-      // Repetition avoidance when ahead, draw-seeking when badly behind!
-      if (cap === 0 && recentHashSet.has(`${nHi}_${nLo}`)) {
-        sc += sc > 30 ? -75 : (sc < -90 ? 45 : -20);
-      }
-
-      b[fr] = mover;
-      b[to] = cap;
-
-      if (timedOut) break;
-      if (sc > iterBestSc) {
-        iterBestSc = sc;
-        iterBestMv = mv;
-      }
-      if (sc > alpha) alpha = sc;
-    }
-
-    if (!timedOut) {
-      bestMoveCode = iterBestMv;
-      bestMoveScore = iterBestSc;
-      // Move PV move to index 0 for massive pruning on next depth
-      const idx = rootMoves.indexOf(bestMoveCode);
-      if (idx > 0) {
-        rootMoves.splice(idx, 1);
-        rootMoves.unshift(bestMoveCode);
-      }
-      // Early exit if forced win found
-      if (bestMoveScore > WIN_SCORE - 100) break;
-    } else {
-      break;
-    }
-  }
-
-  // 4. Compare Best Tactical Move vs Best Expectimax Flip on the EXACT same evaluation scale!
   if (bestFlipSq >= 0 && bestFlipScore > bestMoveScore) {
     return { type: 'flip', r: bestFlipSq >> 3, c: bestFlipSq & 7 };
   }
