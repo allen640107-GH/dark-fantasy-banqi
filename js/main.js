@@ -107,6 +107,12 @@ function bindUI() {
   });
 
   // HUD Controls
+  document.getElementById('btn-quality').addEventListener('click', (e) => {
+    const cine = scene3d.toggleCinematicQuality();
+    e.currentTarget.classList.toggle('active', cine);
+    e.currentTarget.textContent = cine ? '✨ 畫質：電影' : '✨ 畫質：流暢';
+  });
+
   document.getElementById('btn-3d-mode').addEventListener('click', (e) => {
     const on = scene3d.toggleHero3DMode();
     e.currentTarget.classList.toggle('active', on);

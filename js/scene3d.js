@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ROWS, COLS } from './gameLogic.js';
 
 const CELL_SIZE = 1.62;
@@ -29,6 +34,9 @@ export class DarkChessScene3D {
     this.faceTextureCache = new Map();
     this.standeeTextureCache = new Map();
     this.hero3DEnabled = true;
+    this.cinematicMode = true;
+    this.brazierFlames = [];
+    this.abyssCrystal = null;
 
     this.cameraPresetIdx = 0;
     this.cameraLerp = null;
@@ -42,6 +50,7 @@ export class DarkChessScene3D {
     this._initLighting();
     this._initEnvironment();
     this._initBoard();
+    this._initTableProps();
     this._initAmbientParticles();
     this._initRaycasting();
 
@@ -80,8 +89,21 @@ export class DarkChessScene3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = 1.16;
     this.container.appendChild(this.renderer.domElement);
+
+    // HDRI Physically-Based Metallic Environment Reflections (PMREM)
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.68;
+    pmrem.dispose();
+
+    // Cinematic Post-Processing Pipeline (UnrealBloomPass + ACES OutputPass)
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.42, 0.52, 0.78);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -104,7 +126,15 @@ export class DarkChessScene3D {
       this.camera.aspect = nw / nh;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(nw, nh);
+      if (this.composer) this.composer.setSize(nw, nh);
+      if (this.bloomPass) this.bloomPass.setSize(nw, nh);
     });
+  }
+
+  toggleCinematicQuality() {
+    this.cinematicMode = !this.cinematicMode;
+    this.renderer.setPixelRatio(this.cinematicMode ? Math.min(window.devicePixelRatio, 2) : 1);
+    return this.cinematicMode;
   }
 
   _initLighting() {
@@ -179,23 +209,173 @@ export class DarkChessScene3D {
     return tex;
   }
 
+  _heightCanvasToNormalTexture(canvas, strength = 2.4, repeatX = 1, repeatY = 1) {
+    const w = canvas.width, h = canvas.height;
+    const src = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = w;
+    outCanvas.height = h;
+    const octx = outCanvas.getContext('2d');
+    const outImg = octx.createImageData(w, h);
+    const dst = outImg.data;
+
+    const luma = (x, y) => {
+      const ix = ((x % w) + w) % w;
+      const iy = ((y % h) + h) % h;
+      const i = (iy * w + ix) * 4;
+      return (src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114) / 255.0;
+    };
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const dx = (luma(x + 1, y) - luma(x - 1, y)) * strength;
+        const dy = (luma(x, y + 1) - luma(x, y - 1)) * strength;
+        const dz = 1.0;
+        const inv = 1.0 / Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const idx = (y * w + x) * 4;
+        dst[idx] = Math.floor((-dx * inv * 0.5 + 0.5) * 255);
+        dst[idx + 1] = Math.floor((-dy * inv * 0.5 + 0.5) * 255);
+        dst[idx + 2] = Math.floor((dz * inv * 0.5 + 0.5) * 255);
+        dst[idx + 3] = 255;
+      }
+    }
+    octx.putImageData(outImg, 0, 0);
+    const ntex = new THREE.CanvasTexture(outCanvas);
+    ntex.wrapS = ntex.wrapT = THREE.RepeatWrapping;
+    ntex.repeat.set(repeatX, repeatY);
+    return ntex;
+  }
+
   _initEnvironment() {
-    // Realistic charred mahogany dark table surface
+    // Realistic charred mahogany dark banquet table with true PBR Normal Map
     const tableWood = this._makeWoodTexture('#1b1210', '#0a0605', 512);
     tableWood.repeat.set(4, 4);
+    const tableNormal = this._heightCanvasToNormalTexture(tableWood.image, 3.2, 4, 4);
+
     const tableGeo = new THREE.PlaneGeometry(46, 36);
     const tableMat = new THREE.MeshStandardMaterial({
       map: tableWood,
-      bumpMap: tableWood,
-      bumpScale: 0.04,
-      roughness: 0.58,
-      metalness: 0.14
+      normalMap: tableNormal,
+      normalScale: new THREE.Vector2(0.85, 0.85),
+      roughness: 0.48,
+      metalness: 0.18
     });
     const table = new THREE.Mesh(tableGeo, tableMat);
     table.rotation.x = -Math.PI / 2;
     table.position.y = -0.36;
     table.receiveShadow = true;
     this.scene.add(table);
+  }
+
+  _initTableProps() {
+    const props = new THREE.Group();
+    const darkIronMat = new THREE.MeshStandardMaterial({ color: 0x222028, roughness: 0.36, metalness: 0.88 });
+    const bronzeMat = new THREE.MeshStandardMaterial({ color: 0xc99645, roughness: 0.25, metalness: 0.92 });
+    const goldMat = new THREE.MeshStandardMaterial({ color: 0xf5c85c, roughness: 0.2, metalness: 0.96 });
+
+    // 1. Left Crimson Forged Fire Brazier (3D 烈焰鐵鑄火盆)
+    const leftBrazier = new THREE.Group();
+    leftBrazier.position.set(-8.6, -0.36, -2.5);
+    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.45, 0.62, 16), darkIronMat);
+    bowl.position.y = 0.72;
+    bowl.castShadow = true;
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.08, 10, 24), bronzeMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = 1.02;
+    leftBrazier.add(bowl, rim);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.11, 0.85, 8), darkIronMat);
+      leg.position.set(Math.cos(a) * 0.55, 0.4, Math.sin(a) * 0.55);
+      leg.rotation.z = -Math.cos(a) * 0.22;
+      leg.rotation.x = Math.sin(a) * 0.22;
+      leftBrazier.add(leg);
+    }
+    // Glowing molten coal bed + animated multi-layered 3D flames (triggers UnrealBloom!)
+    const coalMat = new THREE.MeshStandardMaterial({ color: 0x3b0c04, emissive: 0xff4500, emissiveIntensity: 2.2, roughness: 0.8 });
+    const coals = new THREE.Mesh(new THREE.SphereGeometry(0.76, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.5), coalMat);
+    coals.scale.y = 0.4;
+    coals.position.y = 0.88;
+    leftBrazier.add(coals);
+
+    const flameSpecs = [
+      { r: 0.36, h: 1.15, x: 0, z: 0, col: 0xff6a1a, phase: 0 },
+      { r: 0.24, h: 0.88, x: -0.22, z: 0.14, col: 0xffb833, phase: 1.7 },
+      { r: 0.22, h: 0.82, x: 0.24, z: -0.12, col: 0xff4400, phase: 3.1 }
+    ];
+    for (const fs of flameSpecs) {
+      const fMesh = new THREE.Mesh(
+        new THREE.ConeGeometry(fs.r, fs.h, 10),
+        new THREE.MeshBasicMaterial({ color: fs.col, transparent: true, opacity: 0.86, blending: THREE.AdditiveBlending })
+      );
+      fMesh.position.set(fs.x, 1.05 + fs.h * 0.42, fs.z);
+      fMesh.userData = { baseY: fMesh.position.y, phase: fs.phase };
+      leftBrazier.add(fMesh);
+      this.brazierFlames.push(fMesh);
+    }
+    props.add(leftBrazier);
+
+    // 2. Right Abyssal Arcane Brazier with Levitating Soul Crystal (3D 冥淵魂晶祭壇)
+    const rightBrazier = new THREE.Group();
+    rightBrazier.position.set(8.6, -0.36, -2.5);
+    const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.95, 0.85, 8), darkIronMat);
+    ped.position.y = 0.42;
+    ped.castShadow = true;
+    const pedRing = new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.06, 8, 24), new THREE.MeshStandardMaterial({ color: 0x5ad4ff, emissive: 0x2299ff, emissiveIntensity: 1.8, metalness: 0.8, roughness: 0.2 }));
+    pedRing.rotation.x = Math.PI / 2;
+    pedRing.position.y = 0.86;
+    rightBrazier.add(ped, pedRing);
+
+    const crystalGroup = new THREE.Group();
+    crystalGroup.position.y = 1.85;
+    const crystal = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.46, 0),
+      new THREE.MeshStandardMaterial({ color: 0x99ecff, emissive: 0x38bdf8, emissiveIntensity: 2.0, roughness: 0.1, metalness: 0.3 })
+    );
+    crystal.scale.set(0.75, 1.45, 0.75);
+    const orbit1 = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.025, 8, 32), new THREE.MeshBasicMaterial({ color: 0xb072ff }));
+    orbit1.rotation.x = Math.PI * 0.35;
+    const orbit2 = new THREE.Mesh(new THREE.TorusGeometry(0.88, 0.018, 8, 32), new THREE.MeshBasicMaterial({ color: 0x5eead4 }));
+    orbit2.rotation.y = Math.PI * 0.4;
+    orbit2.rotation.x = Math.PI * 0.65;
+    crystalGroup.add(crystal, orbit1, orbit2);
+    rightBrazier.add(crystalGroup);
+    this.abyssCrystal = crystalGroup;
+    props.add(rightBrazier);
+
+    // 3. Ancient Rolled War Scroll with Crimson Wax Seal (back-left table edge)
+    const scrollGroup = new THREE.Group();
+    scrollGroup.position.set(-5.8, -0.22, -5.2);
+    scrollGroup.rotation.y = 0.28;
+    const parchmentMat = new THREE.MeshStandardMaterial({ color: 0xd8c39e, roughness: 0.78, metalness: 0.05 });
+    const scrollBody = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 2.3, 14), parchmentMat);
+    scrollBody.rotation.z = Math.PI / 2;
+    scrollBody.castShadow = true;
+    const waxSeal = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.06, 12), new THREE.MeshStandardMaterial({ color: 0xa61c1c, roughness: 0.35 }));
+    waxSeal.position.set(0, 0.15, 0.04);
+    const capL = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.12, 12), bronzeMat);
+    capL.rotation.z = Math.PI / 2;
+    capL.position.x = -1.16;
+    const capR = capL.clone();
+    capR.position.x = 1.16;
+    scrollGroup.add(scrollBody, waxSeal, capL, capR);
+    props.add(scrollGroup);
+
+    // 4. Scattered Antique Gleaming Gold Coins on Table (catching real HDRI highlights!)
+    const coinGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.045, 18);
+    const coinPositions = [
+      [5.4, -4.9, 0], [5.85, -5.1, 0], [5.62, -4.98, 0.045],
+      [6.35, -4.65, 0], [-6.8, 4.4, 0], [-6.45, 4.65, 0], [7.2, 4.3, 0]
+    ];
+    for (const [cx, cz, cy] of coinPositions) {
+      const coin = new THREE.Mesh(coinGeo, goldMat);
+      coin.position.set(cx, -0.335 + cy, cz);
+      coin.castShadow = true;
+      coin.receiveShadow = true;
+      props.add(coin);
+    }
+
+    this.scene.add(props);
   }
 
   _initBoard() {
@@ -301,12 +481,15 @@ export class DarkChessScene3D {
     const boardTex = new THREE.CanvasTexture(surfCanvas);
     boardTex.anisotropy = 8;
     boardTex.colorSpace = THREE.SRGBColorSpace;
+    const boardNormal = this._heightCanvasToNormalTexture(surfCanvas, 2.6, 1, 1);
 
     const surfaceGeo = new THREE.PlaneGeometry(BOARD_W, BOARD_H);
     const surfaceMat = new THREE.MeshStandardMaterial({
       map: boardTex,
-      roughness: 0.45,
-      metalness: 0.3
+      normalMap: boardNormal,
+      normalScale: new THREE.Vector2(0.75, 0.75),
+      roughness: 0.34,
+      metalness: 0.36
     });
     const surfaceMesh = new THREE.Mesh(surfaceGeo, surfaceMat);
     surfaceMesh.rotation.x = -Math.PI / 2;
@@ -715,36 +898,56 @@ export class DarkChessScene3D {
       blending: THREE.AdditiveBlending
     });
 
-    // 1. Summoned 3D Vertical Hero Plaque (thickened gothic holographic standee)
+    // 1. Summoned 3D Sculpted Metallic Gothic Plaque (thickened 3D frame + razor-sharp portrait)
     const standeeTex = this._getHeroStandeeTexture(piece);
     const heightScale = 1.05 + piece.rank * 0.055; // Higher rank heroes stand slightly taller!
-    const pw = 0.86 * (0.94 + piece.rank * 0.02);
-    const ph = 1.08 * heightScale;
+    const pw = 0.88 * (0.94 + piece.rank * 0.02);
+    const ph = 1.10 * heightScale;
 
+    // Front ultra-crisp photorealistic portrait (low emissive so details & face stay razor-sharp!)
     const plaqueGeo = new THREE.PlaneGeometry(pw, ph);
     const plaqueMat = new THREE.MeshStandardMaterial({
       map: standeeTex,
       transparent: true,
       alphaTest: 0.08,
-      roughness: 0.28,
-      metalness: 0.22,
+      roughness: 0.22,
+      metalness: 0.18,
       emissive: glowColor,
-      emissiveIntensity: 0.14,
-      side: THREE.DoubleSide
+      emissiveIntensity: 0.04,
+      side: THREE.FrontSide
     });
-    const plaque = new THREE.Mesh(plaqueGeo, plaqueMat);
-    plaque.position.y = ph * 0.5 + 0.14;
-    plaque.castShadow = true;
-    holoGroup.add(plaque);
+    const frontPlaque = new THREE.Mesh(plaqueGeo, plaqueMat);
+    frontPlaque.position.set(0, ph * 0.5 + 0.14, 0.026);
+    frontPlaque.castShadow = true;
+    holoGroup.add(frontPlaque);
 
-    // Subtle glowing base summoning ring beneath the standee
+    // Rear mirror plaque so rotating 360 deg never shows an empty back
+    const backPlaque = new THREE.Mesh(plaqueGeo, plaqueMat);
+    backPlaque.rotation.y = Math.PI;
+    backPlaque.position.set(0, ph * 0.5 + 0.14, -0.026);
+    holoGroup.add(backPlaque);
+
+    // Real 3D extruded metallic core plate between front & back for tangible sculptural thickness!
+    const coreGeo = new THREE.BoxGeometry(pw * 0.78, ph * 0.74, 0.045);
+    const coreMat = new THREE.MeshStandardMaterial({
+      color: isRed ? 0x3d1c12 : 0x132238,
+      roughness: 0.26,
+      metalness: 0.9
+    });
+    const corePlate = new THREE.Mesh(coreGeo, coreMat);
+    corePlate.position.set(0, ph * 0.48 + 0.14, 0);
+    corePlate.castShadow = true;
+    holoGroup.add(corePlate);
+
+    // Glowing rotating hexagram rune ring beneath the summoned hero
     const baseHalo = new THREE.Mesh(
-      new THREE.RingGeometry(0.42, 0.54, 32),
-      new THREE.MeshBasicMaterial({ color: glowColor, transparent: true, opacity: 0.55, side: THREE.DoubleSide, blending: THREE.AdditiveBlending })
+      new THREE.RingGeometry(0.44, 0.56, 6),
+      new THREE.MeshBasicMaterial({ color: glowColor, transparent: true, opacity: 0.7, side: THREE.DoubleSide, blending: THREE.AdditiveBlending })
     );
     baseHalo.rotation.x = -Math.PI / 2;
     baseHalo.position.y = 0.15;
     holoGroup.add(baseHalo);
+    holoGroup.userData.baseHalo = baseHalo;
 
     // 2. Unique 3D Sculpted Miniature Crest / Weapon per Piece Rank!
     const ornament = new THREE.Group();
@@ -831,7 +1034,7 @@ export class DarkChessScene3D {
     }
 
     holoGroup.add(ornament);
-    holoGroup.userData = { ornament, baseY: PIECE_HEIGHT / 2 };
+    holoGroup.userData = { ornament, baseHalo, baseY: PIECE_HEIGHT / 2 };
     holoGroup.position.y = PIECE_HEIGHT / 2;
     return holoGroup;
   }
@@ -1595,13 +1798,30 @@ export class DarkChessScene3D {
         const hg = entry.holoGroup;
         if (!hg || !hg.visible) continue;
         hg.rotation.y = camYaw;
-        const bob = Math.sin(elapsed * 2.4 + entry.piece.id * 0.9) * 0.045;
+        const bob = Math.sin(elapsed * 2.4 + entry.piece.id * 0.9) * 0.04;
         hg.position.y = hg.userData.baseY + bob;
+        if (hg.userData.baseHalo) {
+          hg.userData.baseHalo.rotation.z += dt * 0.65;
+        }
         const orn = hg.userData.ornament;
         if (orn && orn.userData.spin) {
           orn.rotation.y += dt * 1.45;
         }
       }
+    }
+
+    // Animate 3D Fire Brazier Flames & Levitating Abyssal Soul Crystal
+    for (const fl of this.brazierFlames) {
+      const ph = fl.userData.phase;
+      fl.scale.y = 0.88 + Math.sin(elapsed * 11 + ph) * 0.22 + Math.sin(elapsed * 19 + ph) * 0.08;
+      fl.scale.x = 0.94 + Math.cos(elapsed * 9 + ph) * 0.12;
+      fl.position.y = fl.userData.baseY + Math.sin(elapsed * 12 + ph) * 0.05;
+    }
+    if (this.abyssCrystal) {
+      this.abyssCrystal.position.y = 1.85 + Math.sin(elapsed * 2.1) * 0.12;
+      this.abyssCrystal.rotation.y += dt * 0.85;
+      this.abyssCrystal.children[1].rotation.z += dt * 1.6;
+      this.abyssCrystal.children[2].rotation.z -= dt * 1.2;
     }
 
     // Float ambient embers & abyssal wisps
@@ -1647,6 +1867,10 @@ export class DarkChessScene3D {
       pt.mesh.material.opacity = 1 - pt.life / pt.maxLife;
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.cinematicMode && this.composer) {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 }
