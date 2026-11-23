@@ -241,29 +241,6 @@ html, body {
   color: var(--text-main);
 }
 
-.seg-group.diff-6 {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-}
-
-.seg-group.diff-6 .seg-btn {
-  padding: 9px 6px;
-  font-size: 13px;
-}
-
-.seg-btn.abyss-btn {
-  border-color: rgba(180, 90, 255, 0.35);
-  color: #d6a8ff;
-}
-
-.seg-btn.abyss-btn.active {
-  background: linear-gradient(135deg, rgba(160, 32, 240, 0.45), rgba(224, 52, 46, 0.45));
-  border-color: #e09eff;
-  color: #fff;
-  box-shadow: 0 0 22px rgba(185, 85, 255, 0.55);
-}
-
 .seg-btn.god-btn {
   border-color: rgba(255, 200, 70, 0.48);
   color: #ffe394;

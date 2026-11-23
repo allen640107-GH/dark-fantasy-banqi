@@ -358,11 +358,8 @@ export class BanqiGame {
     const actions = this.getAllLegalActions(color);
     if (actions.length === 0) return null;
 
-    if (this.difficulty === 'easy') return this._aiEasy(actions);
     if (this.difficulty === 'medium') return this._aiMedium(color, actions);
-    if (this.difficulty === 'hard') return this._aiSearchPro(color, actions, { maxDepth: 3, qDepth: 2, budgetMs: 220, advanced: false, deepFlip: false });
-    if (this.difficulty === 'master') return this._aiSearchPro(color, actions, { maxDepth: 5, qDepth: 3, budgetMs: 420, advanced: true, deepFlip: false });
-    if (this.difficulty === 'abyss') return this._aiSearchPro(color, actions, { maxDepth: 7, qDepth: 4, budgetMs: 720, advanced: true, deepFlip: true });
+    if (this.difficulty === 'hard') return this._aiSearchPro(color, actions, { maxDepth: 5, qDepth: 3, budgetMs: 450, advanced: true, deepFlip: true });
     // 'god' (神域級：最高深度8層迭代加深 + 置換表 + 靜態吃子搜尋 + 炮架/暗子全期望值精算)
     return this._aiSearchPro(color, actions, { maxDepth: 8, qDepth: 5, budgetMs: 1100, advanced: true, deepFlip: true, godMode: true });
   }

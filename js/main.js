@@ -182,11 +182,8 @@ function startNewGame() {
   hud.classList.remove('hidden');
 
   const diffLabels = {
-    easy: '入門',
     medium: '普通',
     hard: '困難',
-    master: '宗師',
-    abyss: '地獄',
     god: '神域'
   };
   hudModeBadge.textContent = config.mode === 'pve'
