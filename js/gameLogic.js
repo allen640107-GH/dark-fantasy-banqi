@@ -631,29 +631,30 @@ export class BanqiGame {
         for (const e of adjEnemy) {
           if (canCaptureRank(e.rank, cand.rank)) eatenRisk = true;
         }
-        expectedDelta += eatenRisk ? -cand.meta.value * 0.85 : cand.meta.value * 0.34;
+        // Symmetric zero-sum expectation: revealing our piece safely is +0.12*v, getting it killed is -0.95*v
+        expectedDelta += eatenRisk ? -cand.meta.value * 0.95 : cand.meta.value * 0.12;
       } else {
-        // Enemy revealed: check if it immediately kills our adjacent piece!
+        // Enemy revealed: symmetric baseline -0.12*v, plus major penalty if it kills our adjacent piece!
         let threatCost = 0;
         for (const f of adjFriendly) {
           if (canCaptureRank(cand.rank, f.rank)) {
-            threatCost = Math.max(threatCost, f.meta.value * 0.92);
+            threatCost = Math.max(threatCost, f.meta.value * 0.95);
           }
         }
-        expectedDelta -= threatCost;
-        // Bonus if our cannon or adjacent strong piece can immediately snipe/trap it
+        let trapBonus = 0;
         if (inMyCannonLine) {
-          expectedDelta += cand.meta.value * 0.42;
+          trapBonus += cand.meta.value * 0.45;
         }
         for (const f of adjFriendly) {
           if (canCaptureRank(f.rank, cand.rank) && !canCaptureRank(cand.rank, f.rank)) {
-            expectedDelta += cand.meta.value * 0.22;
+            trapBonus = Math.max(trapBonus, cand.meta.value * 0.28);
           }
         }
+        expectedDelta += (-cand.meta.value * 0.12) - threatCost + trapBonus;
       }
     }
 
-    // Check if any friendly piece is currently under direct enemy attack (if so, don't reward blind flipping!)
+    // Check if any friendly piece is currently under direct enemy attack (if so, penalize blind flipping!)
     let underThreat = false;
     for (let rr = 0; rr < ROWS && !underThreat; rr++) {
       for (let cc = 0; cc < COLS && !underThreat; cc++) {
@@ -667,8 +668,8 @@ export class BanqiGame {
 
     const avgDelta = expectedDelta / pool.length;
     const exploreBias = underThreat
-      ? -6
-      : (godMode ? (pool.length > 10 ? 6 : 1.5) : (advanced ? (pool.length > 12 ? 7 : 3) : 8));
+      ? -10
+      : (godMode ? (pool.length > 10 ? 4.5 : 1.5) : (advanced ? (pool.length > 12 ? 5.5 : 2.5) : 6.5));
     const jitter = godMode ? 0.08 : (advanced ? 0.3 : 1.2);
     return exploreBias + avgDelta + Math.random() * jitter;
   }
@@ -886,10 +887,9 @@ export class BanqiGame {
       let iterBestAction = ordered[0];
       timedOut = false;
 
-      // CRITICAL FIX: What happens if AI wastes its turn flipping instead of rescuing a hanging piece?
-      // Evaluate the opponent's best immediate punishment on the current board!
+      // CRITICAL FIX: Evaluate opponent's immediate 1-ply reply if AI wastes its turn flipping!
       const flipBaseline = deepFlip
-        ? alphaBeta(workBoard, Math.min(d, 3), -Infinity, Infinity, false)
+        ? alphaBeta(workBoard, 1, -Infinity, Infinity, false)
         : this._evaluateBoard(workBoard, color, advanced, godMode);
       if (timedOut) break;
 
