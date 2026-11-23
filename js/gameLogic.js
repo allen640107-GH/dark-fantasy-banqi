@@ -887,10 +887,26 @@ export class BanqiGame {
       let iterBestAction = ordered[0];
       timedOut = false;
 
-      // CRITICAL FIX: Evaluate opponent's immediate 1-ply reply if AI wastes its turn flipping!
-      const flipBaseline = deepFlip
-        ? alphaBeta(workBoard, 1, -Infinity, Infinity, false)
-        : this._evaluateBoard(workBoard, color, advanced, godMode);
+      // CRITICAL FIX: Evaluate opponent's best immediate 1-ply punishment if AI wastes its turn flipping
+      // (without giving AI a free follow-up capture in quiescence!).
+      let flipBaseline = this._evaluateBoard(workBoard, color, advanced, godMode);
+      if (deepFlip) {
+        const oppMoves = getMovesOrdered(workBoard, enemy, false);
+        if (oppMoves.length > 0) {
+          let worst = Infinity;
+          for (const omv of oppMoves) {
+            const om = workBoard[omv.fr][omv.fc];
+            const oc = workBoard[omv.tr][omv.tc];
+            workBoard[omv.tr][omv.tc] = om;
+            workBoard[omv.fr][omv.fc] = null;
+            const sc = this._evaluateBoard(workBoard, color, advanced, godMode);
+            workBoard[omv.fr][omv.fc] = om;
+            workBoard[omv.tr][omv.tc] = oc;
+            if (sc < worst) worst = sc;
+          }
+          flipBaseline = worst;
+        }
+      }
       if (timedOut) break;
 
       for (const act of ordered) {
