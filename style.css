@@ -59,6 +59,124 @@ html, body {
   pointer-events: none;
 }
 
+/* Full-screen unobstructed rotating 3D board showcase */
+.press-start-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 64px;
+  cursor: pointer;
+  background: radial-gradient(circle at center, rgba(0, 0, 0, 0) 52%, rgba(5, 4, 9, 0.55) 100%);
+  transition: opacity 0.45s ease;
+}
+
+.press-start-overlay.leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.press-start-content {
+  text-align: center;
+  animation: fadeInUp 0.9s ease;
+}
+
+.press-title {
+  font-size: clamp(26px, 4vw, 42px);
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  background: linear-gradient(180deg, #fff6db 0%, #e8b55d 58%, #b37324 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 4px 18px rgba(0, 0, 0, 0.95));
+  margin-bottom: 14px;
+}
+
+.press-prompt {
+  display: inline-block;
+  padding: 10px 28px;
+  border-radius: 999px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--gold-bright);
+  background: rgba(12, 10, 18, 0.62);
+  border: 1px solid rgba(229, 184, 105, 0.55);
+  box-shadow: 0 0 24px rgba(229, 184, 105, 0.25);
+  backdrop-filter: blur(6px);
+  animation: pulseGlow 2.2s ease-in-out infinite;
+}
+
+/* Dramatic Menu Entrance Animation */
+#menu-overlay {
+  background: radial-gradient(circle at center, rgba(14, 11, 22, 0.48), rgba(5, 4, 9, 0.78));
+  backdrop-filter: blur(5px);
+}
+
+#menu-overlay.menu-entering {
+  animation: overlayReveal 0.45s ease forwards;
+}
+
+#menu-overlay.menu-entering .menu-card {
+  animation: menuCardEnter 0.62s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+#menu-overlay.menu-entering .menu-header,
+#menu-overlay.menu-entering .menu-section,
+#menu-overlay.menu-entering .menu-actions {
+  opacity: 0;
+  animation: staggerRise 0.48s cubic-bezier(0.2, 0.9, 0.25, 1) forwards;
+}
+
+#menu-overlay.menu-entering .menu-header { animation-delay: 0.08s; }
+#menu-overlay.menu-entering .menu-section:nth-of-type(2) { animation-delay: 0.15s; }
+#menu-overlay.menu-entering .menu-section:nth-of-type(3) { animation-delay: 0.22s; }
+#menu-overlay.menu-entering .menu-section:nth-of-type(4) { animation-delay: 0.28s; }
+#menu-overlay.menu-entering .menu-actions { animation-delay: 0.34s; }
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.72;
+    transform: scale(1);
+    box-shadow: 0 0 18px rgba(229, 184, 105, 0.22);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+    box-shadow: 0 0 32px rgba(255, 210, 120, 0.55);
+  }
+}
+
+@keyframes overlayReveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes menuCardEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(38px) scale(0.92);
+    box-shadow: 0 0 0 rgba(229, 184, 105, 0);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.012);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.9), 0 0 42px rgba(229, 184, 105, 0.38);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 224, 160, 0.16);
+  }
+}
+
+@keyframes staggerRise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* Intro Gate */
 .intro-gate {
   text-align: center;

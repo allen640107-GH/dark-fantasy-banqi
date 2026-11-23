@@ -30,6 +30,7 @@ const introOverlay = document.getElementById('intro-overlay');
 const introGate = document.getElementById('intro-gate');
 const videoStage = document.getElementById('video-stage');
 const introVideo = document.getElementById('intro-video');
+const pressStartOverlay = document.getElementById('press-start-overlay');
 const menuOverlay = document.getElementById('menu-overlay');
 const hud = document.getElementById('hud');
 const gameoverOverlay = document.getElementById('gameover-overlay');
@@ -77,9 +78,29 @@ function bindUI() {
     introVideo.play().catch(() => finishIntro());
   });
 
-  document.getElementById('btn-skip-gate').addEventListener('click', finishIntro);
+  document.getElementById('btn-skip-gate').addEventListener('click', () => {
+    introVideo.pause();
+    introOverlay.classList.add('fade-out');
+    setTimeout(() => {
+      introOverlay.classList.add('hidden');
+      openMenuWithEntrance();
+    }, 450);
+  });
   document.getElementById('btn-skip-video').addEventListener('click', finishIntro);
   introVideo.addEventListener('ended', finishIntro);
+
+  // Clicking anywhere on the rotating 3D board showcase triggers menu entrance animation
+  pressStartOverlay.addEventListener('click', () => {
+    if (pressStartOverlay.classList.contains('leaving')) return;
+    audio.playSfx('select', 0.85, 0);
+    audio.playSfx('gong', 0.35, 0);
+    pressStartOverlay.classList.add('leaving');
+    setTimeout(() => {
+      pressStartOverlay.classList.add('hidden');
+      pressStartOverlay.classList.remove('leaving');
+      openMenuWithEntrance();
+    }, 320);
+  });
 
   // Menu Controls
   document.querySelectorAll('#mode-group .seg-btn').forEach(btn => {
@@ -157,8 +178,7 @@ function bindUI() {
   document.getElementById('btn-menu').addEventListener('click', () => {
     hud.classList.add('hidden');
     gameoverOverlay.classList.add('hidden');
-    menuOverlay.classList.remove('hidden');
-    scene3d.setMenuOrbit(true);
+    openMenuWithEntrance();
   });
 
   btnEndChain.addEventListener('click', () => {
@@ -173,18 +193,27 @@ function bindUI() {
   document.getElementById('btn-back-menu').addEventListener('click', () => {
     gameoverOverlay.classList.add('hidden');
     hud.classList.add('hidden');
-    menuOverlay.classList.remove('hidden');
-    scene3d.setMenuOrbit(true);
+    openMenuWithEntrance();
   });
 }
 
 function finishIntro() {
   introVideo.pause();
+  scene3d.setMenuOrbit(true);
+  audio.startBgm();
   introOverlay.classList.add('fade-out');
   setTimeout(() => {
     introOverlay.classList.add('hidden');
-    menuOverlay.classList.remove('hidden');
+    pressStartOverlay.classList.remove('hidden', 'leaving');
   }, 500);
+}
+
+function openMenuWithEntrance() {
+  scene3d.setMenuOrbit(true);
+  menuOverlay.classList.remove('hidden', 'menu-entering');
+  // Force reflow so the entrance animation replays cleanly every time
+  void menuOverlay.offsetWidth;
+  menuOverlay.classList.add('menu-entering');
 }
 
 function startNewGame() {
