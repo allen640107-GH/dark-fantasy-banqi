@@ -1,4 +1,5 @@
-// Taiwanese Dark Chess (Banqi) Rules Engine + 3-Tier AI
+// Taiwanese Dark Chess (Banqi) Rules Engine + Championship Pro AI Engine
+import { findBestActionPro } from './aiEngine.js';
 
 export const PIECE_META = {
   red: {
@@ -340,7 +341,29 @@ export class BanqiGame {
     }
   }
 
-  // ===================== 6-Tier AI (入門 / 普通 / 困難 / 宗師 / 地獄 / 神域) =====================
+  // ===================== 3-Tier Championship AI (普通 / 困難 / 神域) =====================
+  getAiConfig() {
+    if (this.difficulty === 'medium') {
+      return { maxDepth: 3, qDepth: 2, budgetMs: 120, expectimaxFlips: 3, flipSearchDepth: 1 };
+    }
+    if (this.difficulty === 'hard') {
+      return { maxDepth: 7, qDepth: 4, budgetMs: 480, expectimaxFlips: 6, flipSearchDepth: 1 };
+    }
+    // 'god' (神域級：最高 12 層迭代加深 PVS + 置換表 + 6 層靜態吃子 + 14 桶真期望值 Expectimax 翻棋)
+    return { maxDepth: 12, qDepth: 6, budgetMs: 1250, expectimaxFlips: 10, flipSearchDepth: 2 };
+  }
+
+  getAiWorkerPayload() {
+    return {
+      gameState: {
+        board: this.board,
+        aiColor: this.aiColor,
+        recentBoards: this.history.slice(-10).map(s => ({ board: s.board, turnColor: s.turnColor }))
+      },
+      config: this.getAiConfig()
+    };
+  }
+
   chooseAiAction() {
     const color = this.aiColor;
     if (!color || this.gameOver) return null;
@@ -358,10 +381,8 @@ export class BanqiGame {
     const actions = this.getAllLegalActions(color);
     if (actions.length === 0) return null;
 
-    if (this.difficulty === 'medium') return this._aiMedium(color, actions);
-    if (this.difficulty === 'hard') return this._aiSearchPro(color, actions, { maxDepth: 5, qDepth: 3, budgetMs: 450, advanced: true, deepFlip: true });
-    // 'god' (神域級：最高深度8層迭代加深 + 置換表 + 靜態吃子搜尋 + 炮架/暗子全期望值精算)
-    return this._aiSearchPro(color, actions, { maxDepth: 8, qDepth: 5, budgetMs: 1100, advanced: true, deepFlip: true, godMode: true });
+    const { gameState, config } = this.getAiWorkerPayload();
+    return findBestActionPro(gameState, config);
   }
 
   _aiEasy(actions) {

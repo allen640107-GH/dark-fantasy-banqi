@@ -9,6 +9,14 @@ let selectedPos = null;
 let validMoves = [];
 let isBusy = false;
 let cutinTimer = null;
+let aiWorker = null;
+let aiReqId = 0;
+
+try {
+  aiWorker = new Worker(new URL('./aiWorker.js', import.meta.url), { type: 'module' });
+} catch {
+  aiWorker = null;
+}
 
 // Menu configuration state
 const config = {
@@ -180,6 +188,7 @@ function finishIntro() {
 }
 
 function startNewGame() {
+  aiReqId++;
   isBusy = false;
   game = new BanqiGame(config);
   clearSelection();
@@ -344,8 +353,12 @@ function maybeTriggerAi() {
   if (game.currentPlayer !== 'ai') return;
 
   isBusy = true;
-  setTimeout(async () => {
-    const act = game.chooseAiAction();
+  const reqId = ++aiReqId;
+  const finishAiMove = async (act) => {
+    if (reqId !== aiReqId || game.gameOver) {
+      isBusy = false;
+      return;
+    }
     isBusy = false;
     if (!act) return;
     if (act.type === 'endChain') {
@@ -354,7 +367,21 @@ function maybeTriggerAi() {
     } else {
       await executeAction(act);
     }
-  }, 620);
+  };
+
+  setTimeout(() => {
+    if (reqId !== aiReqId || game.gameOver) {
+      isBusy = false;
+      return;
+    }
+    if (aiWorker && !game.chainPos) {
+      aiWorker.onmessage = (e) => finishAiMove(e.data);
+      aiWorker.onerror = () => finishAiMove(game.chooseAiAction());
+      aiWorker.postMessage(game.getAiWorkerPayload());
+    } else {
+      finishAiMove(game.chooseAiAction());
+    }
+  }, 360);
 }
 
 function showCutin(piece, quote) {
